@@ -285,7 +285,7 @@ static void relnamesToBuf(List* relnames, StringInfo buf)
  */
 Relids predpush_candidates_same_level(PlannerInfo *root)
 {
-    HintState *hstate = root->parse->hintState;
+    HintState *hstate = root->parse->hintState;  // 获取与查询提示相关的状态信息
     if (hstate == NULL)
         return NULL;
 
@@ -296,6 +296,7 @@ Relids predpush_candidates_same_level(PlannerInfo *root)
     Relids result = NULL;
     foreach (lc, hstate->predpush_hint) {
         PredpushHint *predpushHint = (PredpushHint*)lfirst(lc);
+        // 将当前 predpushHint 中的 candidates（候选表的 Relids）与之前收集到的表的 Relids 进行合并
         result = bms_union(result, predpushHint->candidates);
     }
 
@@ -311,17 +312,21 @@ Relids predpush_candidates_same_level(PlannerInfo *root)
  */
 bool is_predpush_same_level_matched(PredpushSameLevelHint* hint, Relids relids, ParamPathInfo* ppi)
 {
+    // 如果没有可用的参数路径信息
     if (ppi == NULL) {
         return false;
     }
+    // 如果提示信息不完整
     if (hint->dest_id == 0 || hint->candidates == NULL) {
         return false;
     }
 
+    // 如果 hint 结构体中的目标 dest_id 不在基表的 relids 集合中，表示目标不匹配
     if (!bms_is_member(hint->dest_id, relids)) {
         return false;
     }
 
+    // 如果参数路径信息 ppi 中的 ppi_req_outer 与 hint 结构体中的 candidates 不相等，表示不匹配
     if (!bms_equal(ppi->ppi_req_outer, hint->candidates)) {
         return false;
     }
@@ -378,7 +383,7 @@ static void SetHintDesc(SetHint* hint, StringInfo buf)
     if (hint->name != NULL) {
         appendStringInfo(buf, "%s", hint->name);
     }
-    
+
     if (hint->value != NULL) {
         appendStringInfo(buf, " %s", hint->value);
     }
@@ -501,6 +506,7 @@ static void JoinMethodHintDesc(JoinMethodHint* hint, StringInfo buf)
 
     appendStringInfo(buf, " %s(", KeywordDesc(hint->base.hint_keyword));
 
+    // 如果存在内连接关系
     if (hint->inner_joinrelids != NULL) {
         appendStringInfo(buf, "(");
     }
@@ -551,18 +557,23 @@ static void RowsHintDesc(RowsHint* hint, StringInfo buf)
     Assert(buf != NULL);
     appendStringInfo(buf, " %s(", KeywordDesc(hint->base.hint_keyword));
 
+    // 将 base_hint 中的关系名称（表名）追加到字符串缓冲 buf 中
     relnamesToBuf(base_hint.relnames, buf);
 
     switch (hint->value_type) {
+        // 表示使用绝对值
         case RVT_ABSOLUTE:
             appendStringInfoString(buf, " #");
             break;
+        // 表示使用相对值的增量
         case RVT_ADD:
             appendStringInfoString(buf, " +");
             break;
+        // 表示使用相对值的减量
         case RVT_SUB:
             appendStringInfoString(buf, " -");
             break;
+        // 表示使用相对值的倍增
         case RVT_MULTI:
             appendStringInfoString(buf, " *");
             break;
@@ -570,9 +581,10 @@ static void RowsHintDesc(RowsHint* hint, StringInfo buf)
             break;
     }
 
+    // 如果指定了一个字符串形式的值
     if (hint->rows_str != NULL) {
         appendStringInfo(buf, " %s", hint->rows_str);
-    } else {
+    } else {  // 如果使用数值类型的值
         appendStringInfo(buf, " %.lf", hint->rows);
     }
 
@@ -586,7 +598,7 @@ static void RowsHintDesc(RowsHint* hint, StringInfo buf)
  */
 static void StreamHintDesc(StreamHint* hint, StringInfo buf)
 {
-#ifndef ENABLE_MULTIPLE_NODES
+#ifndef ENABLE_MULTIPLE_NODES  // 如果不支持多节点
     DISTRIBUTED_FEATURE_NOT_SUPPORTED();
 #endif
     Hint base_hint = hint->base;
@@ -660,14 +672,15 @@ static void SkewHintDesc(SkewHint* hint, StringInfo buf)
      *  case D: skew(t (c1 c2) ((v1 v2) (v3 v4) (v5 v6) ...))
      *  case F: skew((t1 t3) (c1 c2) ((v1 v2) (v3 v4) (v5 v6) ...))
      */
-    if (list_length(hint->base.relnames) == 1) {
+    if (list_length(hint->base.relnames) == 1) {  // 如果关系名列表中只有一个表名
         relnamesToBuf(base_hint.relnames, buf);
-    } else {
+    } else {                                      // 如果关系名列表中有多个表名
         appendStringInfoCharMacro(buf, '(');
         relnamesToBuf(base_hint.relnames, buf);
         appendStringInfoString(buf, ")");
     }
 
+    // 如果列名列表不为 NULL
     if (hint->column_list) {
         appendStringInfoCharMacro(buf, ' ');
         appendStringInfoCharMacro(buf, '(');
@@ -675,9 +688,10 @@ static void SkewHintDesc(SkewHint* hint, StringInfo buf)
         appendStringInfoString(buf, ")");
     }
 
+    // 如果值列表不为 NULL
     if (hint->value_list) {
-        int c_length = list_length(hint->column_list);
-        int v_length = list_length(hint->value_list);
+        int c_length = list_length(hint->column_list);  // 获取列名列表的长度
+        int v_length = list_length(hint->value_list);   // 获取值列表的长度
         ListCell* lc = NULL;
         bool isfirst = true;
         int location = 0;
@@ -698,7 +712,7 @@ static void SkewHintDesc(SkewHint* hint, StringInfo buf)
 
             /* For null value. */
             Node* node = (Node*)lfirst(lc);
-            Value* string_value = (Value*)node;
+            Value* string_value = (Value*)node;  // 将节点转换为 Value 结构体，以便获取值
             char* null_val = "NULL";
             string_value->val.str = IsA(node, Null) ? null_val : string_value->val.str;
 
@@ -815,7 +829,7 @@ static void find_unused_hint_to_buf(List* hint_list, StringInfo hint_buf)
     foreach (lc, hint_list) {
         Hint* hint = (Hint*)lfirst(lc);
 
-        if (hint->state == HINT_STATE_NOTUSED) {
+        if (hint->state == HINT_STATE_NOTUSED) {  //检查当前提示的状态是否为未被使用
             appendStringInfo(hint_buf, "%s", descHint(hint));
         }
     }
@@ -848,14 +862,17 @@ void desc_hint_in_state(PlannerInfo* root, HintState* hstate)
     foreach (lc, hstate->skew_hint) {
         SkewHintTransf* skew_hint_transf = (SkewHintTransf*)lfirst(lc);
         if (skew_hint_transf->before->base.state == HINT_STATE_NOTUSED) {
+            // 调用 descHint 函数，用于获取提示的描述字符串
             appendStringInfo(&str_buf, "%s", descHint((Hint*)skew_hint_transf->before));
         }
     }
 
+    /* 检查 str_buf.data 中是否有未使用的提示字符串 */
     if (strlen(str_buf.data) > 0) {
         StringInfoData str;
         initStringInfo(&str);
         appendStringInfo(&str, "unused hint:%s", str_buf.data);
+        // 将包含未使用提示的字符串添加到 root->glob->hint_warning 列表中，作为警告信息存储起来
         root->glob->hint_warning = lappend(root->glob->hint_warning, makeString(str.data));
     }
 
@@ -920,7 +937,7 @@ static void LeadingHintDelete(LeadingHint* hint)
     }
 
     HINT_FREE_RELNAMES(hint);
-    
+
     pfree_ext(hint);
 }
 
@@ -1225,13 +1242,13 @@ HintState* HintStateCreate()
  */
 static char* get_hints_from_comment(const char* comment_str)
 {
-    char* head = NULL;
-    int len;
-    int comment_len = strlen(comment_str);
-    int hint_start_len = strlen(HINT_START);
-    int start_position = 0;
-    int end_position = 0;
-    errno_t rc;
+    char* head = NULL;                        // 用于存储提取到的提示字符串
+    int len;                                  // 用于存储提示字符串的长度
+    int comment_len = strlen(comment_str);    // 获取注释字符串的长度
+    int hint_start_len = strlen(HINT_START);  // 获取提示字符串起始标记 HINT_START 的长度
+    int start_position = 0;                   // 表示提示字符串的起始位置
+    int end_position = 0;                     // 表示提示字符串的结束位置
+    errno_t rc;                               // 用于存储内存操作的返回值
 
     /* extract query head comment, hint string start with "\*+" */
     if (strncmp(comment_str, HINT_START, hint_start_len) != 0) {
@@ -1259,7 +1276,8 @@ static char* get_hints_from_comment(const char* comment_str)
         return NULL;
     }
 
-    head = (char*)palloc(len + 1);
+    head = (char*)palloc(len + 1);  // 分配足够的内存空间来存储提示字符串
+    // 将提取到的提示字符串复制到 head 中
     rc = memcpy_s(head, len, comment_str + start_position, len);
     securec_check(rc, "\0", "\0");
     head[len] = '\0';
@@ -1293,11 +1311,18 @@ static void drop_duplicate_blockname_hint(HintState* hstate)
     hstate->block_name_hint = delete_invalid_hint(NULL, hstate, hstate->block_name_hint);
 }
 
+/*
+ * @Description: 仅保留列表中的最后一个元素。
+ * @in hintList: 待处理的列表
+ * @return: 只包含最后一个元素的新列表
+ */
 static List* keep_last_hint_cell(List* hintList)
 {
+    /* 如果列表长度小于等于1，则无需处理，直接返回原列表。 */
     if(list_length(hintList) <= 1) {
         return hintList;
     }
+    /* 复制最后一个元素，并释放原列表。 */
     Node* node = (Node*)copyObject(llast(hintList));
     list_free_deep(hintList);
     return lappend(NIL, node);
@@ -1416,6 +1441,11 @@ const AddHintFunc G_HINT_CREATOR[HINT_NUM] = {
     AddNoGPCHint,
 };
 
+/*
+ * @Description: 根据提示字符串生成 HintState 结构体的工作函数。
+ * @in hint_str: 提示字符串
+ * @return: HintState 结构体
+ */
 HintState* create_hintstate_worker(const char* hint_str)
 {
     HintState* hstate = NULL;
@@ -1504,13 +1534,16 @@ HintState* create_hintstate(const char* hints)
 
     char* hint_str = NULL;
 
+    // 从注释中获取提示字符串
     hint_str = get_hints_from_comment(hints);
     if (hint_str == NULL) {
         return NULL;
     }
 
+    // 调用辅助函数创建 HintState 结构体
     HintState* hstate = create_hintstate_worker(hint_str);
 
+    // 释放分配的内存
     pfree_ext(hint_str);
     return hstate;
 }
@@ -1527,18 +1560,21 @@ static int find_relid_aliasname(Query* parse, const char* aliasname, bool find_i
     ListCell* cell = NULL;
     int i = 1;
     int found = NOTFOUNDRELNAME;
+    // 如果不需要在 jointree 中查找，则获取 jointree 中的关系 ID 集合
     Relids relids = find_in_rtable ? NULL : get_relids_in_jointree((Node*)parse->jointree, false);
 
+    // 遍历 rtable（RangeTblEntry 列表）
     foreach (cell, parse->rtable) {
         RangeTblEntry* rte = (RangeTblEntry*)lfirst(cell);
 
         /* skip the relation that doesn't exist in jointree, except skew hint */
         if ((find_in_rtable || bms_is_member(i, relids)) &&
             strncmp(aliasname, rte->eref->aliasname, strlen(aliasname) + 1) == 0) {
+
             if (found == 0) {
-                found = i;
+                found = i;  // 如果之前未找到关系，则记录当前关系 ID
             } else {
-                return AMBIGUOUSRELNAME;
+                return AMBIGUOUSRELNAME;  // 如果之前已经找到过一个关系，则说明存在模糊的别名
             }
         }
 
@@ -1559,10 +1595,12 @@ static Relids create_bms_of_relids(PlannerInfo* root, Query* parse, Hint* hint, 
 {
     int relid;
     Relids relids = currelids;
+    // 获取 relnames 列表，如果为 NIL，则使用提示中的 relnames
     List* relnames = (relnamelist == NIL) ? hint->relnames : relnamelist;
 
     ListCell* lc = NULL;
 
+    // 检查是否是 JoinMethodHint，以及 relnames 的长度是否为 1
     if (IsA(hint, JoinMethodHint) && list_length(relnames) == 1) {
         append_warning_to_list(root, hint, "Error hint:%s requires at least two relations.", hint_string);
         return NULL;
@@ -1577,11 +1615,14 @@ static Relids create_bms_of_relids(PlannerInfo* root, Query* parse, Hint* hint, 
     foreach (lc, relnames) {
         Node* item = (Node*)lfirst(lc);
 
+        // 检查是否是字符串节点
         if (IsA(item, String)) {
             Value* string_value = (Value*)lfirst(lc);
             char* relname = string_value->val.str;
 
+            // 通过关系名在 parse 的 rtable 中查找关系 ID
             relid = find_relid_aliasname(parse, relname, find_in_rtable);
+            // 处理未找到关系名的情况
             if (relid == NOTFOUNDRELNAME) {
                 append_warning_to_list(
                     root, hint, "Error hint:%s, relation name \"%s\" is not found.", hint_string, relname);
@@ -1604,10 +1645,13 @@ static Relids create_bms_of_relids(PlannerInfo* root, Query* parse, Hint* hint, 
                 }
                 return NULL;
             }
+            // 将关系 ID 添加到集合中
             relids = bms_add_member(relids, relid);
         } else {
             Assert(IsA(item, List));
+            // 递归处理嵌套的 relnames 列表
             Relids subrelids = create_bms_of_relids(root, parse, hint, (List*)item, relids);
+            // 处理未能获取有效关系 ID 集合的情况
             if (subrelids != NULL) {
                 relids = subrelids;
             } else if (relids != NULL) {
@@ -1702,6 +1746,7 @@ ScanMethodHint* find_scan_hint(HintState* hstate, Relids relid, HintKeyword keyW
     foreach (l, hstate->scan_hint) {
         ScanMethodHint* scanHint = (ScanMethodHint*)lfirst(l);
 
+        // 如果扫描提示的关键字与给定的 keyWord 相等，并且关系 ID 集合相等，返回扫描提示
         if (scanHint->base.hint_keyword == keyWord && bms_equal(scanHint->relid, relid)) {
             return scanHint;
         }
@@ -1765,6 +1810,7 @@ List* find_specific_join_hint(
  */
 List* find_specific_scan_hint(HintState* hstate, Relids relids, HintKeyword keyWord)
 {
+    // 如果提示状态为空，返回空列表
     if (hstate == NULL) {
         return NIL;
     }
@@ -1776,11 +1822,12 @@ List* find_specific_scan_hint(HintState* hstate, Relids relids, HintKeyword keyW
     foreach (l, hstate->scan_hint) {
         hint = (ScanMethodHint*)lfirst(l);
 
+        // 获取扫描提示的关键字
         HintKeyword hintKeyword = hint->base.hint_keyword;
 
-        if (bms_equal(relids, hint->relid)) {
-            if (hintKeyword == keyWord) {
-                hint_list = lappend(hint_list, hint);
+        if (bms_equal(relids, hint->relid)) {  // 如果扫描提示的关系 ID 集合与给定的 relids 相等
+            if (hintKeyword == keyWord) {      // 如果扫描提示的关键字与给定的 keyWord 相等
+                hint_list = lappend(hint_list, hint);  // 将扫描提示添加到扫描提示列表中
             }
         }
     }
@@ -1797,13 +1844,14 @@ List* find_specific_scan_hint(HintState* hstate, Relids relids, HintKeyword keyW
  */
 static void leading_to_join_hint(HintState* hstate, Relids join_relids, Relids inner_relids, List* relname_list)
 {
-    JoinMethodHint* hint = makeNode(JoinMethodHint);
-    hint->base.hint_keyword = HINT_KEYWORD_LEADING;
-    hint->base.state = HINT_STATE_NOTUSED;
-    hint->base.relnames = (List*)copyObject(relname_list);
-    hint->joinrelids = bms_copy(join_relids);
-    hint->inner_joinrelids = inner_relids;
+    JoinMethodHint* hint = makeNode(JoinMethodHint);  // 创建连接提示结构
+    hint->base.hint_keyword = HINT_KEYWORD_LEADING;   // 设置提示关键字为 LEADING
+    hint->base.state = HINT_STATE_NOTUSED;            // 设置提示状态为未使用
+    hint->base.relnames = (List*)copyObject(relname_list);  // 复制关系名称列表
+    hint->joinrelids = bms_copy(join_relids);         // 复制连接关系 ID 集合
+    hint->inner_joinrelids = inner_relids;            // 设置内连接关系 ID 集合
 
+    // 将连接提示添加到提示状态的连接提示列表中
     hstate->join_hint = lappend(hstate->join_hint, hint);
 }
 
@@ -1896,7 +1944,7 @@ static List* delete_invalid_hint(PlannerInfo* root, HintState* hint, List* list)
     ListCell* pre = NULL;
     ListCell* next = NULL;
 
-    StringInfoData str_buf, warning_buf;
+    StringInfoData str_buf, warning_buf;   // 用于构建字符串的缓冲区
     initStringInfo(&str_buf);
     initStringInfo(&warning_buf);
 
@@ -1907,11 +1955,12 @@ static List* delete_invalid_hint(PlannerInfo* root, HintState* hint, List* list)
 
         Hint* hint = (Hint*)lfirst(lc);
 
+        // 如果提示标记为重复，则从列表中删除
         if (hint->state == HINT_STATE_DUPLICATION) {
-            appendStringInfo(&str_buf, "%s", descHint(hint));
+            appendStringInfo(&str_buf, "%s", descHint(hint));  // 将提示描述追加到字符串缓冲区
 
             hintDelete(hint);
-            list = list_delete_cell(list, lc, pre);
+            list = list_delete_cell(list, lc, pre);  // 从列表中删除当前元素
         } else {
             pre = lc;
         }
@@ -1919,6 +1968,7 @@ static List* delete_invalid_hint(PlannerInfo* root, HintState* hint, List* list)
         lc = next;
     }
 
+    // 构建警告信息字符串
     appendStringInfo(&warning_buf, "Duplicated or conflict hint:%s, will be discarded.", str_buf.data);
 
     /*
@@ -2108,6 +2158,7 @@ static void drop_duplicate_predpush_same_level_hint(PlannerInfo* root, HintState
             while (lc_next != NULL) {
                 PredpushSameLevelHint* predpush_same_level_hint = (PredpushSameLevelHint*)lfirst(lc_next);
 
+                // 判断两个提示的目标ID是否相同
                 if (predpushSameLevelHint->dest_id == predpush_same_level_hint->dest_id) {
                     predpush_same_level_hint->base.state = HINT_STATE_DUPLICATION;
                     hasError = true;
@@ -2132,14 +2183,18 @@ static void drop_duplicate_rewrite_hint(PlannerInfo* root, HintState* hstate)
     bool hasError = false;
     ListCell* lc = NULL;
 
+    // 遍历重写提示列表
     foreach (lc, hstate->rewrite_hint) {
         RewriteHint* rewriteHint = (RewriteHint*)lfirst(lc);
 
+        // 如果提示已经标记为重复，则跳过
         if (rewriteHint->base.state != HINT_STATE_DUPLICATION) {
             ListCell* lc_next = lnext(lc);
+            // 遍历列表中的剩余提示
             while (lc_next != NULL) {
                 RewriteHint* rewrite_hint = (RewriteHint*)lfirst(lc_next);
 
+                // 检查两个重写提示的参数名列表是否相同
                 List *list_diff = list_difference(rewriteHint->param_names, rewrite_hint->param_names);
                 if (list_diff == NIL) {
                     rewrite_hint->base.state = HINT_STATE_DUPLICATION;
@@ -2152,6 +2207,7 @@ static void drop_duplicate_rewrite_hint(PlannerInfo* root, HintState* hstate)
         }
     }
 
+    // 如果存在重复，删除重复的重写提示
     if (hasError) {
         hstate->rewrite_hint = delete_invalid_hint(root, hstate, hstate->rewrite_hint);
     }
@@ -2163,22 +2219,26 @@ static void drop_duplicate_rewrite_hint(PlannerInfo* root, HintState* hstate)
  */
 static void drop_duplicate_gather_hint(PlannerInfo* root, HintState* hstate)
 {
-    bool hasError = false;
-    bool hfirst = true;
-    ListCell* lc = NULL;
+    bool hasError = false;  // 用于标记是否存在重复的Gather提示
+    bool hfirst = true;     // 用于标记是否是第一个Gather提示
+    ListCell* lc = NULL;    // 列表元素指针，用于遍历Gather提示列表
+    // 如果Gather提示数量大于1，表示存在多个Gather提示
     if (list_length(hstate->gather_hint) > 1) {
         foreach(lc, hstate->gather_hint) {
+            // 如果是第一个Gather提示，跳过不处理
             if (hfirst) {
                 hfirst = false;
                 continue;
             }
-            GatherHint* gatherHint = (GatherHint*)lfirst(lc);
-            gatherHint->base.state = HINT_STATE_DUPLICATION;
+            GatherHint* gatherHint = (GatherHint*)lfirst(lc);  // 获取当前遍历到的Gather提示
+            gatherHint->base.state = HINT_STATE_DUPLICATION;   // 将当前Gather提示标记为重复
             hasError = true;
         }
+        // 输出警告信息，表示存在多个Gather提示，仅使用第一个提示
         elog(WARNING, "Gather Hint: Multiple Gather Hint found. Execute with the first one instead.");
     }
 
+    // 如果存在重复，删除重复的Gather提示
     if (hasError) {
         hstate->gather_hint = delete_invalid_hint(root, hstate, hstate->gather_hint);
     }
@@ -2190,14 +2250,16 @@ static void drop_duplicate_gather_hint(PlannerInfo* root, HintState* hstate)
  */
 static void drop_duplicate_scan_hint(PlannerInfo* root, HintState* hstate)
 {
-    bool hasError = false;
-    ListCell* lc = NULL;
+    bool hasError = false;  // 用于标记是否存在重复的扫描提示
+    ListCell* lc = NULL;    // 列表元素指针，用于遍历扫描提示列表
 
     foreach (lc, hstate->scan_hint) {
         ScanMethodHint* scanHint = (ScanMethodHint*)lfirst(lc);
 
+        // 检查当前扫描提示是否已经被标记为重复，避免对已经处理过的扫描提示再次处理
         if (scanHint->base.state != HINT_STATE_DUPLICATION) {
             ListCell* lc_next = lnext(lc);
+            // 内层循环，比较当前扫描提示与后续扫描提示
             while (lc_next != NULL) {
                 ScanMethodHint* scan_hint = (ScanMethodHint*)lfirst(lc_next);
 
@@ -2226,6 +2288,7 @@ static void drop_duplicate_scan_hint(PlannerInfo* root, HintState* hstate)
                                 dup_hint = scan_hint;
                             }
                         } else {
+                            // 如果两个提示都有索引，比较索引列表
                             List* diff = list_difference(scanHint->indexlist, scan_hint->indexlist);
                             if (diff == NIL) {
                                 dup_hint = scan_hint;
@@ -2233,8 +2296,9 @@ static void drop_duplicate_scan_hint(PlannerInfo* root, HintState* hstate)
                                 list_free(diff);
                             }
                         }
-                        
+
                         if (dup_hint != NULL) {
+                            // 如果索引列表相同，标记其中一个为重复
                             dup_hint->base.state = HINT_STATE_DUPLICATION;
                             hasError = true;
                             if (dup_hint == scanHint) {
@@ -2253,6 +2317,7 @@ static void drop_duplicate_scan_hint(PlannerInfo* root, HintState* hstate)
         }
     }
 
+    // 如果存在重复，删除重复的扫描提示
     if (hasError) {
         hstate->scan_hint = delete_invalid_hint(root, hstate, hstate->scan_hint);
     }
@@ -2518,6 +2583,7 @@ static bool set_skew_value_to_datum(
  */
 static void set_skew_value(PlannerInfo* root, SkewHintTransf* skew_hint_transf, Oid* col_typid)
 {
+     // 如果 skew hint 的值列表或列列表为空，或者它们的长度为 0，则直接返回
     if (skew_hint_transf->before->value_list == NIL ||
         skew_hint_transf->before->column_list == NIL ||
         list_length(skew_hint_transf->before->value_list) == 0 ||
@@ -2525,6 +2591,7 @@ static void set_skew_value(PlannerInfo* root, SkewHintTransf* skew_hint_transf, 
         return;
     }
 
+    // 如果值列表长度大于限定的最大值，则添加警告并返回
     if (list_length(skew_hint_transf->before->value_list) >
         MAX_SKEW_NUM * list_length(skew_hint_transf->before->column_list)) {
         append_warning_to_list(root,
@@ -2536,6 +2603,7 @@ static void set_skew_value(PlannerInfo* root, SkewHintTransf* skew_hint_transf, 
         return;
     }
 
+    // 如果值列表长度不能被列列表长度整除，则添加警告并返回
     if (list_length(skew_hint_transf->before->value_list) % list_length(skew_hint_transf->before->column_list) != 0) {
         skew_hint_transf->value_info_list = NIL;
         append_warning_to_list(root,
@@ -2557,6 +2625,7 @@ static void set_skew_value(PlannerInfo* root, SkewHintTransf* skew_hint_transf, 
     Const* val_const = NULL;
     int i = 0;
 
+    // 遍历值列表
     foreach (lc, skew_hint_transf->before->value_list) {
         SkewValueInfo* value_info = makeNode(SkewValueInfo);
 
@@ -2566,6 +2635,7 @@ static void set_skew_value(PlannerInfo* root, SkewHintTransf* skew_hint_transf, 
         bool constisnull = false;
         ErrorData* edata = NULL;
 
+        // 计算列的编号
         col_num = i % c_length;
         val_typid = col_typid[col_num];
 
@@ -2578,6 +2648,7 @@ static void set_skew_value(PlannerInfo* root, SkewHintTransf* skew_hint_transf, 
         /* 1.Set skew value into datum. */
         bool set = set_skew_value_to_datum(skew_value, &val_datum, &constisnull, val_typid, val_typmod, &edata);
 
+        // 如果设置失败，则添加警告并返回
         if (set == false) {
             append_warning_to_list(root,
                 (Hint*)skew_hint_transf->before,
@@ -2632,12 +2703,16 @@ void pull_up_expr_varno(Query* parse, RangeTblEntry* rte, SkewColumnInfo* column
 
     Var* var = NULL;
     ListCell* lc = NULL;
+    // 计算偏移量，以便在上推子查询时更新变量的 varno 和 varnoold
     int rtoffset = list_length(parse->rtable) - list_length(rte->subquery->rtable);
 
+    // 复制表达式以避免修改原始表达式
     Expr* expr = (Expr*)copyObject(column_info->expr);
 
+    // 获取表达式中的变量列表
     List* var_list = pull_var_clause((Node*)expr, PVC_RECURSE_AGGREGATES, PVC_RECURSE_PLACEHOLDERS);
 
+    // 遍历变量列表，更新变量的 varno 和 varnoold
     foreach (lc, var_list) {
         var = (Var*)lfirst(lc);
 
@@ -2645,6 +2720,7 @@ void pull_up_expr_varno(Query* parse, RangeTblEntry* rte, SkewColumnInfo* column
         var->varnoold = var->varnoold + rtoffset;
     }
 
+    // 更新列信息中的表达式
     column_info->expr = expr;
 }
 
@@ -2700,12 +2776,16 @@ static void set_colinfo_by_tge(
  */
 static void set_colinfo_by_relation(Oid relid, int location, SkewColumnInfo* column_info, char* column_name)
 {
+    // 保存当前的资源拥有者
     ResourceOwner currentOwner = t_thrd.utils_cxt.CurrentResourceOwner;
+    // 声明一个临时变量用于保存当前资源拥有者，以备后续恢复
     ResourceOwner tmpOwner;
+    // 创建一个新的资源拥有者，用于处理倾斜提示，并将其设置为当前资源拥有者
     t_thrd.utils_cxt.CurrentResourceOwner = ResourceOwnerCreate(currentOwner, "ForSkewHint",
         THREAD_GET_MEM_CXT_GROUP(MEMORY_CONTEXT_OPTIMIZER));
     Relation relation = NULL;
 
+    // 以访问共享锁的方式打开具有给定关系OID的关系
     relation = heap_open(relid, AccessShareLock);
 
     Assert((location + 1) == relation->rd_att->attrs[location].attnum);
@@ -2717,6 +2797,7 @@ static void set_colinfo_by_relation(Oid relid, int location, SkewColumnInfo* col
     column_info->column_typid = relation->rd_att->attrs[location].atttypid;
     column_info->expr = NULL;
 
+    // 关闭关系，释放锁
     heap_close(relation, AccessShareLock);
 
     ResourceOwnerRelease(t_thrd.utils_cxt.CurrentResourceOwner, RESOURCE_RELEASE_BEFORE_LOCKS, true, true);
@@ -2725,7 +2806,9 @@ static void set_colinfo_by_relation(Oid relid, int location, SkewColumnInfo* col
 
     tmpOwner = t_thrd.utils_cxt.CurrentResourceOwner;
     t_thrd.utils_cxt.CurrentResourceOwner = NULL;
+    // 删除临时资源拥有者
     ResourceOwnerDelete(tmpOwner);
+    // 恢复之前保存的资源拥有者
     t_thrd.utils_cxt.CurrentResourceOwner = currentOwner;
 }
 
@@ -2812,9 +2895,11 @@ static TargetEntry* find_column_in_targetlist_by_location(RangeTblEntry* rte, in
             /* For DFX. */
             foreach (lc, var_list) {
                 Var* var = (Var*)lfirst(lc);
+                // 获取变量所属的子查询范围表条目
                 ListCell* lc_rte = list_nth_cell(rte->subquery->rtable, var->varno - 1);
                 RangeTblEntry* sub_rte = (RangeTblEntry*)lfirst(lc_rte);
 
+                // 如果子查询范围表条目不是关系（基本关系）或子查询，则将其赋值给 col_rte
                 if (sub_rte->rtekind != RTE_RELATION && sub_rte->rtekind != RTE_SUBQUERY) {
                     *col_rte = sub_rte;
                 }
@@ -2829,6 +2914,7 @@ static TargetEntry* find_column_in_targetlist_by_location(RangeTblEntry* rte, in
                 /* Check the var num. */
                 Assert(var->varno > 0);
                 Assert((unsigned int)list_length(rte->subquery->rtable) >= var->varno);
+                // 如果变量号无效
                 if (var->varno < 1 || var->varno > (unsigned int)list_length(rte->subquery->rtable)) {
                     return NULL;
                 }
@@ -2843,6 +2929,7 @@ static TargetEntry* find_column_in_targetlist_by_location(RangeTblEntry* rte, in
                     return NULL;
                 }
 
+                // 递归调用该函数，继续在当前子查询中查找目标列表中的列
                 return find_column_in_targetlist_by_location(sub_rte, location, col_rte);
             }
         }
@@ -3359,6 +3446,7 @@ static void check_predpush_cycle_hint(PlannerInfo *root,
 {
     ListCell *lc = NULL;
 
+    /* 如果候选集合成员数量不为1，或者目标ID为0，直接返回 */
     if (bms_num_members(predpush_hint->candidates) != 1) {
         return;
     }
@@ -3368,9 +3456,11 @@ static void check_predpush_cycle_hint(PlannerInfo *root,
     }
 
     int cur_dest = predpush_hint->dest_id;
+    // 遍历Predpush提示列表
     foreach(lc, predpush_hint_list) {
         PredpushHint *prev_hint = (PredpushHint *)lfirst(lc);
 
+        // 如果当前提示是之前的提示，跳过
         if (prev_hint == predpush_hint) {
             break;
         }
@@ -3384,6 +3474,7 @@ static void check_predpush_cycle_hint(PlannerInfo *root,
         }
 
         int prev_dest = prev_hint->dest_id;
+        // 如果当前提示和之前的提示相互依赖，发出警告
         if (bms_is_member(prev_dest, predpush_hint->candidates) &&
             bms_is_member(cur_dest, prev_hint->candidates)) {
             append_warning_to_list(
@@ -3472,23 +3563,32 @@ static void transform_rewrite_hint(PlannerInfo* root, Query* parse, List* rewrit
 {
     if (rewrite_hint_list == NULL)
         return;
-    
+
     ListCell* lc = NULL;
+    // 遍历重写提示列表
     foreach (lc, rewrite_hint_list) {
         RewriteHint* rewrite_hint = (RewriteHint*)lfirst(lc);
+        // 如果参数名列表为空，跳过
         if (rewrite_hint->param_names == NULL) {
             continue;
         }
-
+        // 调用函数获取重写规则的位图表示
         rewrite_hint->param_bits = get_rewrite_rule_bits(rewrite_hint);
     }
 }
 
+/*
+ * 参数：
+ *     hint：包含了重写提示中的参数名列表
+ * 功能：
+ *     将重写提示（rewrite hint）中的参数名转换为位图表示。
+ */
 static unsigned int get_rewrite_rule_bits(RewriteHint* hint)
 {
     ListCell* lc = NULL;
     unsigned int bits = 0;
 
+    // 遍历参数名列表，根据参数名设置对应的位
     foreach (lc, hint->param_names)
     {
         Node *param_name_str = (Node*)lfirst(lc);
@@ -3500,6 +3600,7 @@ static unsigned int get_rewrite_rule_bits(RewriteHint* hint)
         }
         char* param_name = ((Value*)param_name_str)->val.str;
 
+        // 根据参数名设置对应的位
         if (pg_strcasecmp(param_name, "lazyagg") == 0) {
             bits = bits | LAZY_AGG;
         }
@@ -3546,15 +3647,19 @@ bool permit_from_rewrite_hint(PlannerInfo *root, unsigned int params)
         return true;
 
     ListCell* lc = NULL;
+    // 遍历重写提示列表
     foreach (lc, hstate->rewrite_hint) {
         RewriteHint* rewrite_hint = (RewriteHint*)lfirst(lc);
 
+        // 获取重写规则的位图表示
         if (rewrite_hint->param_bits == 0)
             bits = get_rewrite_rule_bits(rewrite_hint);
-        else 
+        else
             bits = rewrite_hint->param_bits;
 
+        // 检查参数位图是否与重写规则的位图匹配
         if (bits & params) {
+            // 如果匹配，将当前提示标记为已使用，并返回 false，表示不允许应用该规则
             rewrite_hint->base.state = HINT_STATE_USED;
             return false;
         }
@@ -3663,22 +3768,29 @@ void transform_hints(PlannerInfo* root, Query* parse, HintState* hstate)
  */
 void check_scan_hint_validity(PlannerInfo* root)
 {
+    // 获取当前查询级别的 HintState
     HintState* hintstate = root->parse->hintState;
     if (hintstate == NULL) {
         return;
     }
 
+    // 初始化扫描提示列表的迭代器
     ListCell* lc = list_head(hintstate->scan_hint);
     ListCell* pre = NULL;
     ListCell* next = NULL;
 
+    // 遍历扫描提示列表
     while (lc != NULL) {
+        // 获取当前扫描提示
         ScanMethodHint* scanHint = (ScanMethodHint*)lfirst(lc);
+        // 用于标记是否需要删除当前扫描提示
         bool deleted = false;
+        // 记录下一个扫描提示，以便在删除当前扫描提示时继续迭代
         next = lnext(lc);
 
         /* check if there's more index specified */
         if (list_length(scanHint->indexlist) > 1) {
+            // 追加错误信息到警告列表中，并标记删除
             append_warning_to_list(
                 root, (Hint*)scanHint, "Error hint:%s, only one index can be specified in scan hint.", hint_string);
             deleted = true;
@@ -3689,14 +3801,17 @@ void check_scan_hint_validity(PlannerInfo* root)
             RelOptInfo* rel = root->simple_rel_array[relindex];
             char* hint_index_name = strVal(linitial(scanHint->indexlist));
             ListCell* lc2 = NULL;
+            // 遍历表的索引列表，查找指定的索引
             foreach (lc2, rel->indexlist) {
                 IndexOptInfo* info = (IndexOptInfo*)lfirst(lc2);
                 char* index_name = get_rel_name(info->indexoid);
 
+                // 如果找到指定的索引，结束遍历
                 if (index_name && strncmp(hint_index_name, index_name, strlen(index_name) + 1) == 0) {
                     break;
                 }
             }
+            // 如果未找到指定的索引，追加错误信息到警告列表中，并标记删除
             if (lc2 == NULL) {
                 append_warning_to_list(
                     root, (Hint*)scanHint, "Error hint:%s, index \"%s\" doesn't exist.", hint_string, hint_index_name);
@@ -3704,6 +3819,7 @@ void check_scan_hint_validity(PlannerInfo* root)
             }
             pfree_ext(relids);
         }
+        // 根据标记的删除状态，删除相应的扫描提示
         if (deleted) {
             hintDelete((Hint*)scanHint);
             root->parse->hintState->scan_hint = list_delete_cell(root->parse->hintState->scan_hint, lc, pre);
@@ -3736,6 +3852,16 @@ void adjust_scanhint_relid(HintState* hstate, Index oldIdx, Index newIdx)
     }
 }
 
+/*
+ * 参数：
+ *     node: 要遍历的节点
+ *     context: 保存警告信息的上下文结构体
+ * 功能：
+ *     该函数是一个树遍历函数，用于从查询树中提取提示警告。
+ *     遍历 Query 节点，提取其中 HintState 中的提示警告信息，将其添加到 context->warning 中。
+ *     清空查询节点的 hint_warning 并递归地调用 query_tree_walker 遍历查询子树。
+ *     对于其他节点，调用 expression_tree_walker 进行表达式树的遍历。
+ */
 bool pull_hint_warning_walker(Node* node, pull_hint_warning_context* context)
 {
     if (node == NULL) {
@@ -3757,6 +3883,12 @@ bool pull_hint_warning_walker(Node* node, pull_hint_warning_context* context)
     return expression_tree_walker(node, (bool (*)())pull_hint_warning_walker, (void*)context);
 }
 
+/*
+ * 参数：
+ *     parse: 查询节点
+ * 功能：
+ *     该函数是一个入口点，用于调用 pull_hint_warning_walker 来检索查询树中的提示警告。
+ */
 List* retrieve_query_hint_warning(Node* parse)
 {
     pull_hint_warning_context context;
@@ -3765,6 +3897,14 @@ List* retrieve_query_hint_warning(Node* parse)
     return context.warning;
 }
 
+/*
+ * 参数：
+ *     query: 查询节点
+ *     lev: 输出的级别
+ * 功能：
+ *     根据节点类型切换，从相关的子查询节点中检索提示警告。
+ *     将检索到的提示警告传递给 output_hint_warning 函数，进行输出或处理。
+ */
 void output_utility_hint_warning(Node* query, int lev)
 {
     List* warning = NIL;
@@ -3868,8 +4008,17 @@ const char* G_SET_HINT_WHITE_LIST[] = {
     (char*)"try_vector_engine_strategy",
     (char*)"var_eq_const_selectivity"};
 
+// 表示白名单数组 G_SET_HINT_WHITE_LIST 中元素的数量
 const unsigned int G_NUM_SET_HINT_WHITE_LIST = sizeof(G_SET_HINT_WHITE_LIST) / sizeof(G_SET_HINT_WHITE_LIST[0]);
 
+/*
+ * 参数：
+ *     s1：待比较的关键字
+ *     s2：数组元素的地址
+ * 功能：
+ *     用于字符串比较，使用 PostgreSQL 提供的 pg_strcasecmp 函数
+ *    （不区分大小写地比较两个字符串）来比较这两个字符串，并返回比较结果。
+ */
 static int param_str_cmp(const void *s1, const void *s2)
 {
     const char *key = (const char *)s1;
@@ -3877,6 +4026,12 @@ static int param_str_cmp(const void *s1, const void *s2)
     return pg_strcasecmp(key, *arg);
 }
 
+/*
+ * 参数：
+ *     name：待检查名称
+ * 功能：
+ *     用于检查某个名称是否在白名单中。
+ */
 bool check_set_hint_in_white_list(const char* name)
 {
     if (name == NULL) {
@@ -3890,6 +4045,15 @@ bool check_set_hint_in_white_list(const char* name)
     return res != NULL;
 }
 
+/*
+ * 参数：
+ *     subquery: 表示一个子查询
+ * 功能：
+ *     该函数用于检查子查询是否包含 no_expand_hint 提示。
+ *     如果子查询的提示状态（hintState）存在且包含 no_expand_hint 提示列表，
+ *     那么将列表的第一个元素转换为 NoExpandHint 类型，将该提示的状态标记为
+ *     已使用（HINT_STATE_USED），并返回 true 表示存在；否则返回 false。
+*/
 bool has_no_expand_hint(Query* subquery)
 {
     if (subquery->hintState == NULL) {
@@ -3903,6 +4067,15 @@ bool has_no_expand_hint(Query* subquery)
     return false;
 }
 
+/*
+ * 参数：
+ *     hintState: 表示查询提示状态
+ * 功能：
+ *     该函数用于检查查询提示状态是否包含 no_gpc_hint 提示。
+ *     如果查询提示状态存在且包含 no_gpc_hint 提示列表，那么将列表的第一个元素转换
+ *     为 NoGPCHint 类型，将该提示的状态标记为已使用（HINT_STATE_USED），并返回
+ *     true 表示存在；否则返回 false。
+*/
 bool has_no_gpc_hint(HintState* hintState)
 {
     if (hintState == NULL) {
@@ -3937,6 +4110,15 @@ static bool IsScanUseDesthint(void* val1, void* val2)
     }
 }
 
+/*
+ * 参数：
+ *     query: 表示要处理的查询
+ *     hint: 表示要移除的提示类型
+ * 功能：
+ *     该函数用于移除查询中特定类型的提示。它首先检查查询的提示状态（hintState）是否存在，
+ *     然后检查是否有扫描提示（scan_hint）。如果存在扫描提示，就调用 list_cell_clear 函数
+ *     来移除列表中匹配给定提示类型的元素。IsScanUseDesthint 函数用于判断是否匹配提示类型。
+ */
 void RemoveQueryHintByType(Query *query, HintKeyword hint)
 {
     if (query->hintState && query->hintState->scan_hint) {
@@ -3944,6 +4126,14 @@ void RemoveQueryHintByType(Query *query, HintKeyword hint)
     }
 }
 
+/*
+ * 参数：
+ *     hintstate: 表示查询提示状态
+ * 功能：
+ *     该函数用于检查给定的查询提示状态中是否存在名为 "node_name" 的设置提示。
+ *     遍历查询提示状态中的设置提示列表（set_hint），对比每个提示的名称（name），
+ *     如果找到名称为 "node_name" 的提示，返回 true，表示存在这样的设置提示；否则返回 false。
+ */
 bool CheckNodeNameHint(HintState* hintstate)
 {
     if (hintstate == NULL) {

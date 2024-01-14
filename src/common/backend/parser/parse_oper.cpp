@@ -91,6 +91,7 @@ Oid LookupOperName(ParseState* pstate, List* opername, Oid oprleft, Oid oprright
 {
     Oid result;
 
+    // 通过 OpernameGetOprid 查找运算符的 OID
     result = OpernameGetOprid(opername, oprleft, oprright);
     if (OidIsValid(result))
         return result;
@@ -237,12 +238,22 @@ static Form_pg_operator check_operator_is_shell(List* opname, ParseState* pstate
     return opform;
 }
 
+/*
+ * @Description: 在运算符缓存中查找映射。
+ *
+ * @param key: 运算符缓存键
+ * @param key_ok: 缓存键是否有效
+ *
+ * @return: 在系统缓存中找到的运算符元组，如果未找到或缓存键无效则返回 NULL
+ */
 static HeapTuple find_mapping_in_cache(OprCacheKey key, bool key_ok)
 {
     HeapTuple tup = NULL;
     if (key_ok) {
+        // 在运算符缓存中查找运算符的 OID
         Oid operOid = find_oper_cache_entry(&key);
         if (OidIsValid(operOid))
+            // 根据运算符的 OID 在系统缓存中查找运算符元组
             tup = SearchSysCache1(OPEROID, ObjectIdGetDatum(operOid));
     }
     return tup;
@@ -396,6 +407,7 @@ Operator oper(ParseState* pstate, List* opname, Oid ltypeId, Oid rtypeId, bool n
     HeapTuple tup;
     bool use_a_style_coercion = false;
 
+    // 在数值计算上下文中，且启用字符串转数字功能，将整型和字符型强制转换为数值型
     if (inNumeric && u_sess->attr.attr_sql.convert_string_to_digit &&
         ((IsIntType(ltypeId) && IsCharType(rtypeId)) || (IsIntType(rtypeId) && IsCharType(ltypeId)))) {
         ltypeId = NUMERICOID;
@@ -403,12 +415,23 @@ Operator oper(ParseState* pstate, List* opname, Oid ltypeId, Oid rtypeId, bool n
     }
 
     /*
+     * In A_FORMAT compatibility and CHAR_COERCE_COMPAT, we choose TEXT-related
+     * operators for varchar and bpchar.
+     */
+    if (DB_IS_CMPT(A_FORMAT) && CHAR_COERCE_COMPAT && (((ltypeId == VARCHAROID) && (rtypeId == BPCHAROID)) ||
+        ((rtypeId == VARCHAROID) && (ltypeId == BPCHAROID)))) {
+        ltypeId = TEXTOID;
+        rtypeId = TEXTOID;
+    }
+
+    /*
      * Try to find the mapping in the lookaside cache.
      */
     if (pstate != NULL) {
+        // 在 A_STYLE_COERCE 功能启用的情况下，使用 A 样式强制转换
         use_a_style_coercion = pstate->p_is_decode && ENABLE_SQL_BETA_FEATURE(A_STYLE_COERCE);
     }
-        
+
     key_ok = make_oper_cache_key(&key, opname, ltypeId, rtypeId, use_a_style_coercion);
     tup = find_mapping_in_cache(key, key_ok);
     if (HeapTupleIsValid(tup))
@@ -444,9 +467,11 @@ Operator oper(ParseState* pstate, List* opname, Oid ltypeId, Oid rtypeId, bool n
         }
     }
 
+    // 如果找到有效的运算符OID，则在系统缓存中查找对应的运算符元组
     if (OidIsValid(operOid))
         tup = SearchSysCache1(OPEROID, ObjectIdGetDatum(operOid));
 
+    // 如果找到有效的运算符元组，且key_ok为真，则将找到的运算符信息存入运算符缓存
     if (HeapTupleIsValid(tup)) {
         if (key_ok)
             make_oper_cache_entry(&key, operOid);
@@ -498,14 +523,16 @@ Operator compatible_oper(ParseState* pstate, List* op, Oid arg1, Oid arg2, bool 
  */
 Oid compatible_oper_opid(List* op, Oid arg1, Oid arg2, bool noError)
 {
-    Operator optup;
-    Oid result;
+    Operator optup;  // 用于存储运算符信息的指针
+    Oid result;      // 存储最终的运算符 OID
 
+    // 调用 compatible_oper 函数获取运算符信息
     optup = compatible_oper(NULL, op, arg1, arg2, noError, -1);
+    // 如果找到运算符
     if (optup != NULL) {
-        result = oprid(optup);
-        ReleaseSysCache(optup);
-        return result;
+        result = oprid(optup);    // 获取运算符的 OID
+        ReleaseSysCache(optup);   // 释放运算符信息的系统缓存
+        return result;            // 返回运算符的 OID
     }
     return InvalidOid;
 }
@@ -983,6 +1010,7 @@ static Oid find_oper_cache_entry(OprCacheKey* key)
 {
     OprCacheEntry* oprentry = NULL;
 
+    // 如果运算符缓存哈希表尚未初始化，则进行初始化
     if (u_sess->parser_cxt.opr_cache_hash == NULL) {
         /* First time through: initialize the hash table */
         HASHCTL ctl;
@@ -994,6 +1022,7 @@ static Oid find_oper_cache_entry(OprCacheKey* key)
         ctl.entrysize = sizeof(OprCacheEntry);
         ctl.hash = tag_hash;
         ctl.hcxt = u_sess->cache_mem_cxt;
+        // 创建哈希表
         u_sess->parser_cxt.opr_cache_hash =
             hash_create("Operator lookup cache", 256, &ctl, HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT);
 
@@ -1005,9 +1034,9 @@ static Oid find_oper_cache_entry(OprCacheKey* key)
     /* Look for an existing entry */
     oprentry = (OprCacheEntry*)hash_search(u_sess->parser_cxt.opr_cache_hash, (void*)key, HASH_FIND, NULL);
     if (oprentry == NULL)
-        return InvalidOid;
+        return InvalidOid;  // 未找到匹配的缓存条目
 
-    return oprentry->opr_oid;
+    return oprentry->opr_oid;  // 返回找到的运算符 OID
 }
 
 /*
@@ -1019,13 +1048,16 @@ static void make_oper_cache_entry(OprCacheKey* key, Oid opr_oid)
 {
     OprCacheEntry* oprentry = NULL;
 
+    // 如果运算符缓存哈希表尚未初始化，则报错
     if (unlikely(u_sess->parser_cxt.opr_cache_hash == NULL)) {
-        ereport(ERROR, 
-            (errcode(ERRCODE_UNEXPECTED_NULL_VALUE), 
+        ereport(ERROR,
+            (errcode(ERRCODE_UNEXPECTED_NULL_VALUE),
                 errmsg("u_sess->parser_cxt.opr_cache_hash should not be null")));
     }
 
+    // 尝试在哈希表中插入新条目
     oprentry = (OprCacheEntry*)hash_search(u_sess->parser_cxt.opr_cache_hash, (void*)key, HASH_ENTER, NULL);
+    // 设置新插入的运算符 OID
     oprentry->opr_oid = opr_oid;
 }
 
@@ -1057,7 +1089,9 @@ void InvalidateOprCacheCallBack(Datum arg, int cacheid, uint32 hashvalue)
     /* Currently we just flush all entries; hard to be smarter ... */
     hash_seq_init(&status, u_sess->parser_cxt.opr_cache_hash);
 
+    // 遍历运算符缓存哈希表中的所有条目，并将它们删除
     while ((hentry = (OprCacheEntry*)hash_seq_search(&status)) != NULL) {
+        // 从哈希表中删除条目
         if (hash_search(u_sess->parser_cxt.opr_cache_hash, (void*)&hentry->key, HASH_REMOVE, NULL) == NULL)
             ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION), errmsg("hash table corrupted")));
     }
