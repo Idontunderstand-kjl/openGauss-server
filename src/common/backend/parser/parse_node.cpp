@@ -43,6 +43,7 @@ ParseState* make_parsestate(ParseState* parentParseState)
 {
     ParseState* pstate = NULL;
 
+    // 为 ParseState 结构分配内存
     pstate = (ParseState*)palloc0(sizeof(ParseState));
 
     pstate->parentParseState = parentParseState;
@@ -189,7 +190,7 @@ static void pcb_error_callback(void* arg)
     }
 }
 
-/* 
+/*
  * For timeseries table to identify hidden column type and return NULL or
  * build a Var node for an attribute identified by RTE and attrno for others.
  */
@@ -199,13 +200,16 @@ Var* ts_make_var(ParseState* pstate, RangeTblEntry* rte, int attrno, int locatio
     int32 type_mod;
     Oid var_collid;
     int kv_type = ATT_KV_UNDEFINED;
+    // 获取范围表条目的属性类型信息
     get_rte_attribute_type(rte, attrno, &var_type_id, &type_mod, &var_collid, &kv_type);
+    // 如果是隐藏列，返回 NULL
     if (kv_type == ATT_KV_HIDE) {
         return NULL;
     }
 
     Var* result = NULL;
     int vnum, sublevels_up;
+    // 获取范围表条目在范围表中的位置
     vnum = RTERangeTablePosn(pstate, rte, &sublevels_up);
     result = makeVar(vnum, attrno, var_type_id, type_mod, var_collid, sublevels_up);
     result->location = location;
@@ -224,8 +228,11 @@ Var* make_var(ParseState* pstate, RangeTblEntry* rte, int attrno, int location)
     int32 type_mod;
     Oid varcollid;
 
+    // 获取范围表条目在范围表中的位置
     vnum = RTERangeTablePosn(pstate, rte, &sublevels_up);
+    // 获取范围表条目的属性类型信息
     get_rte_attribute_type(rte, attrno, &vartypeid, &type_mod, &varcollid);
+    // 构建 Var 节点
     result = makeVar(vnum, attrno, vartypeid, type_mod, varcollid, sublevels_up);
     result->location = location;
     return result;

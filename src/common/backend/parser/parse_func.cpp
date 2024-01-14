@@ -67,33 +67,33 @@ static Oid cl_get_input_param_original_type(Oid func_oid, int argno);
 Node* ParseFuncOrColumn(ParseState* pstate, List* funcname, List* fargs, Node* last_srf, FuncCall* fn, int location,
                         bool call_func)
 {
-    bool is_column = (fn == NULL);
-    List* agg_order = (fn ? fn->agg_order : NIL);
-    bool agg_within_group = (fn ? fn->agg_within_group : false);
-    bool agg_star = (fn ? fn->agg_star : false);
-    bool agg_distinct = (fn ? fn->agg_distinct : false);
-    bool func_variadic = (fn ? fn->func_variadic : false);
-    WindowDef* over = (fn ? fn->over : NULL);
-    Oid rettype;
-    int rettype_orig = -1;
-    Oid funcid;
-    ListCell* l = NULL;
-    ListCell* nextl = NULL;
-    Node* first_arg = NULL;
-    int nargs;
-    int nargsplusdefs;
-    Oid actual_arg_types[FUNC_MAX_ARGS];
-    Oid* declared_arg_types = NULL;
-    List* argnames = NIL;
-    List* argdefaults = NIL;
-    Node* retval = NULL;
-    bool retset = false;
-    int nvargs;
-    Oid vatype;
-    FuncDetailCode fdresult;
-    char aggkind = 'n';
-    char* name_string = NULL;
-    Oid refSynOid = InvalidOid;
+    bool is_column = (fn == NULL);                                // 判断是否为列投影
+    List* agg_order = (fn ? fn->agg_order : NIL);                 // 聚合函数的排序列表
+    bool agg_within_group = (fn ? fn->agg_within_group : false);  // 是否WITHIN GROUP
+    bool agg_star = (fn ? fn->agg_star : false);                  // 聚合函数是否带星号（*）
+    bool agg_distinct = (fn ? fn->agg_distinct : false);          // 聚合函数是否带DISTINCT
+    bool func_variadic = (fn ? fn->func_variadic : false);        // 函数是否为可变参数
+    WindowDef* over = (fn ? fn->over : NULL);                     // 窗口函数定义
+    Oid rettype;                                                  // 返回类型
+    int rettype_orig = -1;                                        // 原始返回类型
+    Oid funcid;                                                   // 函数ID
+    ListCell* l = NULL;                                           // 列表项指针
+    ListCell* nextl = NULL;                                       // 下一个列表项指针
+    Node* first_arg = NULL;                                       // 第一个参数
+    int nargs;                                                    // 参数数量
+    int nargsplusdefs;                                            // 参数数量加默认参数数量
+    Oid actual_arg_types[FUNC_MAX_ARGS];                          // 实际参数类型数组
+    Oid* declared_arg_types = NULL;                               // 声明的参数类型数组
+    List* argnames = NIL;                                         // 参数名称列表
+    List* argdefaults = NIL;                                      // 默认参数列表
+    Node* retval = NULL;                                          // 返回值
+    bool retset = false;                                          // 是否返回集合
+    int nvargs;                                                   // 可变参数数量
+    Oid vatype;                                                   // 可变参数类型
+    FuncDetailCode fdresult;                                      // 函数详细信息码
+    char aggkind = 'n';                                           // 聚合函数种类
+    char* name_string = NULL;                                     // 函数名字符串
+    Oid refSynOid = InvalidOid;                                   // 引用的同义词ID
     /*
      * Most of the rest of the parser just assumes that functions do not have
      * more than FUNC_MAX_ARGS parameters.	We have to test here to protect
@@ -166,6 +166,7 @@ Node* ParseFuncOrColumn(ParseState* pstate, List* funcname, List* fargs, Node* l
         }
     }
 
+    // 获取第一个参数
     if (fargs != NIL) {
         first_arg = (Node*)linitial(fargs);
         Assert(first_arg != NULL);
@@ -181,6 +182,7 @@ Node* ParseFuncOrColumn(ParseState* pstate, List* funcname, List* fargs, Node* l
         argnames == NIL && list_length(funcname) == 1) {
         Oid argtype = actual_arg_types[0];
 
+        // 参数为RECORDOID或复杂类型时，尝试解析为列投影
         if (argtype == RECORDOID || ISCOMPLEX(argtype)) {
             retval = ParseComplexProjection(pstate, strVal(linitial(funcname)), first_arg, location);
             if (retval != NULL)
@@ -425,8 +427,9 @@ Node* ParseFuncOrColumn(ParseState* pstate, List* funcname, List* fargs, Node* l
      * planner has to insert the up-to-date values at plan time.
      */
     nargsplusdefs = nargs;
+    // 遍历默认参数列表
     foreach (l, argdefaults) {
-        Node* expr = (Node*)lfirst(l);
+        Node* expr = (Node*)lfirst(l);  // 获取当前默认参数的表达式
 
         /* probably shouldn't happen ... */
         if (nargsplusdefs >= FUNC_MAX_ARGS)
@@ -456,28 +459,29 @@ Node* ParseFuncOrColumn(ParseState* pstate, List* funcname, List* fargs, Node* l
      * into an array --- unless it's an "any" variadic.
      */
     if (nvargs > 0 && declared_arg_types[nargs - 1] != ANYOID) {
-        ArrayExpr* newa = makeNode(ArrayExpr);
-        int non_var_args = nargs - nvargs;
+        ArrayExpr* newa = makeNode(ArrayExpr);  // 创建一个新的数组表达式节点
+        int non_var_args = nargs - nvargs;  // 计算非变长参数的数量
         List* vargs = NIL;
 
         Assert(non_var_args >= 0);
-        vargs = list_copy_tail(fargs, non_var_args);
-        fargs = list_truncate(fargs, non_var_args);
+        vargs = list_copy_tail(fargs, non_var_args);  // 复制最后的 nvargs 个参数，准备转换为数组
+        fargs = list_truncate(fargs, non_var_args);  // 截断原始参数列表，去除将转换为数组的参数
 
-        newa->elements = vargs;
+        newa->elements = vargs;  // 设置数组表达式的元素为复制的参数
         /* assume all the variadic arguments were coerced to the same type */
         newa->element_typeid = exprType((Node*)linitial(vargs));
-        newa->array_typeid = get_array_type(newa->element_typeid);
+        newa->array_typeid = get_array_type(newa->element_typeid);  // 获取数组的类型
+        /* 如果数组类型无效，报告错误 */
         if (!OidIsValid(newa->array_typeid))
             ereport(ERROR,
                 (errcode(ERRCODE_UNDEFINED_OBJECT),
                     errmsg("could not find array type for data type %s", format_type_be(newa->element_typeid)),
                     parser_errposition(pstate, exprLocation((Node*)vargs))));
         /* array_collid will be set by parse_collate.c */
-        newa->multidims = false;
-        newa->location = exprLocation((Node*)vargs);
+        newa->multidims = false;  // 表示数组是一维的
+        newa->location = exprLocation((Node*)vargs);  // 设置数组表达式的位置
 
-        fargs = lappend(fargs, newa);
+        fargs = lappend(fargs, newa);  // 将新的数组表达式添加到参数列表中
     }
 
     /* if it returns a set, check that's OK */
@@ -486,9 +490,10 @@ Node* ParseFuncOrColumn(ParseState* pstate, List* funcname, List* fargs, Node* l
     }
 
     /* build the appropriate output structure */
-    if (fdresult == FUNCDETAIL_NORMAL) {
-        FuncExpr* funcexpr = makeNode(FuncExpr);
+    if (fdresult == FUNCDETAIL_NORMAL) {  // 检查函数的详细信息是否为正常
+        FuncExpr* funcexpr = makeNode(FuncExpr);  // 创建一个新的函数表达式节点
 
+        /* 设置 funcexpr 的各个属性 */
         funcexpr->funcid = funcid;
         funcexpr->funcresulttype = rettype;
         funcexpr->funcresulttype_orig = rettype_orig;
@@ -496,24 +501,26 @@ Node* ParseFuncOrColumn(ParseState* pstate, List* funcname, List* fargs, Node* l
         funcexpr->funcvariadic = func_variadic;
         funcexpr->funcformat = COERCE_EXPLICIT_CALL;
         /* funccollid and inputcollid will be set by parse_collate.c */
-        funcexpr->args = fargs;
+        funcexpr->args = fargs; // 将函数的参数设置为之前解析得到的参数列表
         funcexpr->location = location;
         /* refSynOid will be set when need to record dependency */
         funcexpr->refSynOid = refSynOid;
 
         retval = (Node*)funcexpr;
         /*Return type of to_date function  will be changed from timestamp to date type in C_FORMAT*/
+        /* 检查 SQL 的兼容性设置是否不是 A_FORMAT，检查函数是否为 to_date 函数 */
         if (u_sess->attr.attr_sql.sql_compatibility != A_FORMAT &&
             (funcid == TODATEFUNCOID || funcid == TODATEDEFAULTFUNCOID)) {
             FuncExpr* timestamp_date_fun = makeNode(FuncExpr);
 
+            /* 设置将返回类型从 timestamp 更改为 date 类型的相关属性 */
             timestamp_date_fun->funcid = TIMESTAMP2DATEOID;
             timestamp_date_fun->funcresulttype = DATEOID;
             timestamp_date_fun->funcretset = false;
             timestamp_date_fun->funcformat = COERCE_EXPLICIT_CAST;
-            timestamp_date_fun->args = list_make1(funcexpr);
+            timestamp_date_fun->args = list_make1(funcexpr); // 将之前创建的 funcexpr 作为参数传递给新的函数
             timestamp_date_fun->location = location;
-            retval = (Node*)timestamp_date_fun;
+            retval = (Node*)timestamp_date_fun; // 将新创建的函数表达式节点转换为通用的节点类型
         }
     } else if (fdresult == FUNCDETAIL_AGGREGATE && over == NULL) {
         /* aggregate function */
@@ -581,8 +588,8 @@ Node* ParseFuncOrColumn(ParseState* pstate, List* funcname, List* fargs, Node* l
         /* wincollid and inputcollid will be set by parse_collate.c */
         wfunc->args = fargs;
         /* winref will be set by transformWindowFuncCall */
-        wfunc->winstar = agg_star;
-        wfunc->winagg = (fdresult == FUNCDETAIL_AGGREGATE);
+        wfunc->winstar = agg_star;  // 表示是否是类似 COUNT(*) 这样的窗口函数
+        wfunc->winagg = (fdresult == FUNCDETAIL_AGGREGATE);  // 表示是否是窗口聚合函数
         wfunc->location = location;
 
         /*
@@ -640,23 +647,26 @@ Node* ParseFuncOrColumn(ParseState* pstate, List* funcname, List* fargs, Node* l
                     parser_errposition(pstate, location)));
 
         /* For listagg, multiple different order info is not allowed.*/
-        ListCell* lc = NULL;
-        bool isInvalidOrder = false;
+        ListCell* lc = NULL;  // 遍历聚合函数的排序信息列表的迭代器
+        bool isInvalidOrder = false;  // 标志是否存在多个不同的排序信息
 
         foreach (lc, agg_order) {
             SortBy* aggorder = (SortBy*)lfirst(lc);
+            // 如果已经存在窗口定义的排序信息，并且当前排序信息不在窗口定义的排序信息列表中
             if (over->orderClause != NIL && !list_member(over->orderClause, aggorder)) {
-                isInvalidOrder = true;
+                isInvalidOrder = true;  // 标记存在多个不同的排序信息
                 break;
             }
         }
 
+        // 如果存在多个不同的排序信息，则报错
         if (isInvalidOrder)
             ereport(ERROR,
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                     errmsg("window functions cannot allow multiple different order info"),
                     parser_errposition(pstate, location)));
 
+        // 如果窗口定义的排序信息列表为空，则使用聚合函数的排序信息列表
         if (over->orderClause == NIL)
             over->orderClause = agg_order;
 
@@ -691,16 +701,18 @@ Node* ParseFuncOrColumn(ParseState* pstate, List* funcname, List* fargs, Node* l
 int func_match_argtypes(
     int nargs, Oid* input_typeids, FuncCandidateList raw_candidates, FuncCandidateList* candidates) /* return value */
 {
-    FuncCandidateList current_candidate;
-    FuncCandidateList next_candidate;
-    int ncandidates = 0;
+    FuncCandidateList current_candidate;  // 当前候选函数
+    FuncCandidateList next_candidate;     // 下一个候选函数
+    int ncandidates = 0;                  // 匹配的候选函数数量
 
-    *candidates = NULL;
+    *candidates = NULL;                   // 初始化匹配列表
 
+    // 遍历原始候选函数列表
     for (current_candidate = raw_candidates; current_candidate != NULL; current_candidate = next_candidate) {
         next_candidate = current_candidate->next;
+        // 如果当前候选函数可以通过强制类型转换接受输入数据类型
         if (can_coerce_type(nargs, input_typeids, current_candidate->args, COERCION_IMPLICIT)) {
-            current_candidate->next = *candidates;
+            current_candidate->next = *candidates;  // 将当前候选函数加入匹配列表
             *candidates = current_candidate;
             ncandidates++;
         }
@@ -1066,7 +1078,7 @@ FuncCandidateList func_select_candidate(int nargs, Oid* input_typeids, FuncCandi
      * While we're at it, count the number of unknown-type arguments for use
      * later.
      */
-    nunknowns = 0;
+    nunknowns = 0;  // 用于计数未知类型的参数
     for (i = 0; i < nargs; i++) {
         if (input_typeids[i] != UNKNOWNOID)
             input_base_typeids[i] = getBaseType(input_typeids[i]);
@@ -1089,8 +1101,8 @@ FuncCandidateList func_select_candidate(int nargs, Oid* input_typeids, FuncCandi
          * so we should also admit highest type conversion for operations
          * between different type categories
          */
-        if (u_sess->attr.attr_sql.sql_compatibility == C_FORMAT && !different_category &&
-            slot_category[i] != TYPCATEGORY_UNKNOWN) {
+        if ((u_sess->attr.attr_sql.sql_compatibility == C_FORMAT || u_sess->attr.attr_sql.transform_to_numeric_operators)
+            && !different_category && slot_category[i] != TYPCATEGORY_UNKNOWN) {
             if (current_category == TYPCATEGORY_INVALID)
                 current_category = slot_category[i];
             else if (slot_category[i] != current_category)
@@ -1101,6 +1113,7 @@ FuncCandidateList func_select_candidate(int nargs, Oid* input_typeids, FuncCandi
     ncandidates = 0;
     nbestMatch = 0;
     last_candidate = NULL;
+    /* 第一轮：遍历候选项，计算每个候选项与输入参数类型匹配的数量 */
     for (current_candidate = candidates; current_candidate != NULL; current_candidate = current_candidate->next) {
 
         current_typeids = current_candidate->args;
@@ -1112,6 +1125,7 @@ FuncCandidateList func_select_candidate(int nargs, Oid* input_typeids, FuncCandi
                 nmatch++;
         }
 
+        // 根据匹配数量决定是否保留该候选项
         keep_candidate(nmatch, nbestMatch, current_candidate, last_candidate, candidates, ncandidates);
     }
 
@@ -1131,6 +1145,7 @@ FuncCandidateList func_select_candidate(int nargs, Oid* input_typeids, FuncCandi
     ncandidates = 0;
     nbestMatch = 0;
     last_candidate = NULL;
+    /* 第二轮：遍历候选项，计算每个候选项与输入参数类型（包括首选类型）匹配的数量 */
     for (current_candidate = candidates; current_candidate != NULL; current_candidate = current_candidate->next) {
         current_typeids = current_candidate->args;
         nmatch = 0;
@@ -1169,6 +1184,7 @@ FuncCandidateList func_select_candidate(int nargs, Oid* input_typeids, FuncCandi
     ncandidates = 0;
     nbestMatch = 0;
     last_candidate = NULL;
+    /* 第三轮：遍历候选项，计算每个候选项与输入参数类型（包括优先级）匹配的数量 */
     for (current_candidate = candidates; current_candidate != NULL; current_candidate = current_candidate->next) {
 
         current_typeids = current_candidate->args;
@@ -1212,9 +1228,9 @@ FuncCandidateList func_select_candidate(int nargs, Oid* input_typeids, FuncCandi
      * that one.  However, if this rule turns out to reject all candidates,
      * keep them all instead.
      */
-    resolved_unknowns = false;
+    resolved_unknowns = false;  // 表示是否成功解析未知参数
     for (i = 0; i < nargs; i++) {
-        bool have_conflict = false;
+        bool have_conflict = false;  // 表示是否在当前参数位置存在冲突
 
         if (input_base_typeids[i] != UNKNOWNOID)
             continue;
@@ -1223,8 +1239,10 @@ FuncCandidateList func_select_candidate(int nargs, Oid* input_typeids, FuncCandi
         slot_has_preferred_type[i] = false;
         have_conflict = false;
         for (current_candidate = candidates; current_candidate != NULL; current_candidate = current_candidate->next) {
-            current_typeids = current_candidate->args;
-            current_type = current_typeids[i];
+            current_typeids = current_candidate->args;  // 获取当前候选项的参数类型
+            current_type = current_typeids[i];  // 获取当前候选项在当前参数位置的类型
+
+            // 获取当前类型的类型类别以及是否为首选类型
             get_type_category_preferred(current_type, &current_category, &current_is_preferred);
             if (slot_category[i] == TYPCATEGORY_INVALID) {
                 /* first candidate */
@@ -1254,23 +1272,26 @@ FuncCandidateList func_select_candidate(int nargs, Oid* input_typeids, FuncCandi
         }
     }
 
-    if (resolved_unknowns) {
+    if (resolved_unknowns) {  // 如果成功解析了未知参数的类型类别
         /* Strip non-matching candidates */
         ncandidates = 0;
         first_candidate = candidates;
         last_candidate = NULL;
         for (current_candidate = candidates; current_candidate != NULL; current_candidate = current_candidate->next) {
-            bool keepit = true;
+            bool keepit = true;  // 表示当前候选项是否应该保留
             current_typeids = current_candidate->args;
             for (i = 0; i < nargs; i++) {
+                // 如果当前参数的基本类型已知，跳过处理
                 if (input_base_typeids[i] != UNKNOWNOID)
                     continue;
                 current_type = current_typeids[i];
                 get_type_category_preferred(current_type, &current_category, &current_is_preferred);
+                /* 如果当前候选项的类型类别与解析的未知参数的类型类别不匹配，标记不保留当前候选项*/
                 if (current_category != slot_category[i]) {
                     keepit = false;
                     break;
                 }
+                /* 如果当前候选项需要首选类型而实际不是首选类型，标记不保留当前候选项 */
                 if (slot_has_preferred_type[i] && !current_is_preferred) {
                     keepit = false;
                     break;
@@ -1318,6 +1339,7 @@ FuncCandidateList func_select_candidate(int nargs, Oid* input_typeids, FuncCandi
                 continue;
             if (known_type == UNKNOWNOID) /* first known arg? */
                 known_type = input_base_typeids[i];
+            //  如果已知类型与当前参数类型不同, 跳出循环
             else if (known_type != input_base_typeids[i]) {
                 /* oops, not all match */
                 known_type = UNKNOWNOID;
@@ -1334,6 +1356,7 @@ FuncCandidateList func_select_candidate(int nargs, Oid* input_typeids, FuncCandi
             for (current_candidate = candidates; current_candidate != NULL;
                  current_candidate = current_candidate->next) {
                 current_typeids = current_candidate->args;
+                //如果可以进行隐式类型转换
                 if (can_coerce_type(nargs, input_base_typeids, current_typeids, COERCION_IMPLICIT)) {
                     if (++ncandidates > 1)
                         break; /* not unique, give up */
@@ -1342,7 +1365,7 @@ FuncCandidateList func_select_candidate(int nargs, Oid* input_typeids, FuncCandi
             }
             if (ncandidates == 1) {
                 /* successfully identified a unique match */
-                last_candidate->next = NULL;
+                last_candidate->next = NULL;  // 将最后一个候选项的next指针设为NULL，截断候选项链表
                 return last_candidate;
             }
         }
@@ -1456,10 +1479,12 @@ FuncCandidateList func_select_candidate(int nargs, Oid* input_typeids, FuncCandi
  */
 FuncCandidateList sort_candidate_func_list(FuncCandidateList oldCandidates)
 {
+    // 检查候选列表是否为空或只有一个元素，如果是，则直接返回
     if (oldCandidates == NULL || oldCandidates->next == NULL) {
         return oldCandidates;
     }
 
+    // 计算候选列表的大小
     FuncCandidateList cur = oldCandidates;
     int size = 0;
     while (cur) {
@@ -1467,6 +1492,7 @@ FuncCandidateList sort_candidate_func_list(FuncCandidateList oldCandidates)
         cur = cur->next;
     }
 
+    // 将候选项放入数组中以便排序
     cur = oldCandidates;
     FuncCandidateList* candidates = (FuncCandidateList*)palloc0(sizeof(FuncCandidateList) * size);
     int index = 0;
@@ -1474,9 +1500,10 @@ FuncCandidateList sort_candidate_func_list(FuncCandidateList oldCandidates)
         candidates[index++] = cur;
         cur = cur->next;
     }
-	
+
     FuncCandidateList sortedCandidates = NULL;
     FuncCandidateList lastCandidate = NULL;
+    // 选择排序算法，按参数数量升序排序候选列表
     for (int i = 0; i < size; i++) {
         if (candidates[i] == NULL) {
             continue;
@@ -1489,6 +1516,7 @@ FuncCandidateList sort_candidate_func_list(FuncCandidateList oldCandidates)
             }
         }
 
+        // 将找到的最小候选项移动到排序后的列表
         FuncCandidateList smallest = candidates[smallestIndex];
         if (lastCandidate == NULL) {
             lastCandidate = smallest;
@@ -1500,7 +1528,8 @@ FuncCandidateList sort_candidate_func_list(FuncCandidateList oldCandidates)
         }
         candidates[smallestIndex] = NULL;
     }
-    
+
+    // 处理未被选择的候选项，将其添加到排序后的列表中
     for (int i = 0; i < size; i++) {
         if (candidates[i] != NULL) {
             lastCandidate->next = candidates[i];
@@ -1571,8 +1600,11 @@ FuncDetailCode func_get_detail(List* funcname, List* fargs, List* fargnames, int
     }
 
 #ifndef ENABLE_MULTIPLE_NODES
+    /* 检查是否启用了enable_out_param_override，
+     * 如果启用了，则获取包含存储过程和函数的候选函数列表
+     */
     if (enable_out_param_override()) {
-        /* For A compatiablity, CALL statement only can invoke Procedure in SQL or Function in PLSQL, */ 
+        /* For A compatiablity, CALL statement only can invoke Procedure in SQL or Function in PLSQL, */
         /* and SELECT statement can only invoke Function. but now it does't distinguish for compatible with the old code.*/
         raw_candidates = FuncnameGetCandidates(funcname, nargs, fargnames, expand_variadic, expand_defaults, false, true, PROKIND_UNKNOWN);
     } else {
@@ -1598,6 +1630,7 @@ FuncDetailCode func_get_detail(List* funcname, List* fargs, List* fargnames, int
         }
     }
 
+    // 对候选列表进行排序
     raw_candidates = sort_candidate_func_list(raw_candidates);
 #else
     /* Get list of possible candidates from namespace search */
@@ -1620,7 +1653,7 @@ FuncDetailCode func_get_detail(List* funcname, List* fargs, List* fargnames, int
             }
         }
     }
-#endif	
+#endif
 
 
     /*
@@ -1795,35 +1828,43 @@ FuncDetailCode func_get_detail(List* funcname, List* fargs, List* fargnames, int
             }
         }
 
+        // 从系统缓存中按照函数OID查询函数元组
         ftup = SearchSysCache1(PROCOID, ObjectIdGetDatum(best_candidate->oid));
+        // 检查获取的函数元组是否有效
         if (!HeapTupleIsValid(ftup)) /* should not happen */
             ereport(ERROR,
                 (errcode(ERRCODE_CACHE_LOOKUP_FAILED),
                     errmsg("cache lookup failed for function %u", best_candidate->oid)));
+        // 将获取的函数元组转换为 Form_pg_proc 结构体，以便访问其中的字段
         pform = (Form_pg_proc)GETSTRUCT(ftup);
         *rettype = pform->prorettype;
+        // 检查返回类型是否为客户端逻辑加密类型，并且调用者是否要求获取原始返回类型
         if (IsClientLogicType(*rettype) && rettype_orig) {
             HeapTuple gstup = SearchSysCache1(GSCLPROCID, ObjectIdGetDatum(best_candidate->oid));
+            // 检查获取的客户端逻辑加密信息的元组是否有效
             if (!HeapTupleIsValid(gstup)) /* should not happen */
                 ereport(ERROR, (errcode(ERRCODE_CACHE_LOOKUP_FAILED),
                     errmsg("cache lookup failed for function %u", best_candidate->oid)));
             Form_gs_encrypted_proc gsform = (Form_gs_encrypted_proc)GETSTRUCT(gstup);
             *rettype_orig = gsform->prorettype_orig;
-            ReleaseSysCache(gstup);
+            ReleaseSysCache(gstup);  // 释放客户端逻辑加密信息的元组的系统缓存
         }
         *retset = pform->proretset;
         *vatype = pform->provariadic;
         /* fetch default args if caller wants 'em */
         if (argdefaults != NULL && best_candidate->ndargs > 0) {
             /* shouldn't happen, FuncnameGetCandidates messed up */
+            // 检查是否存在足够数量的默认参数
             if (best_candidate->ndargs > pform->pronargdefaults)
                 ereport(ERROR,
                     (errcode(ERRCODE_UNDEFINED_FUNCTION), errmodule(MOD_OPT), errmsg("not enough default arguments")));
 
             *argdefaults = GetDefaultVale(*funcid, best_candidate->argnumbers, best_candidate->ndargs);
         }
+        // 如果函数是聚合函数
         if (pform->proisagg)
             result = FUNCDETAIL_AGGREGATE;
+        // 如果函数是窗口函数
         else if (pform->proiswindow)
             result = FUNCDETAIL_WINDOWFUNC;
         else
@@ -1850,13 +1891,13 @@ FuncDetailCode func_get_detail(List* funcname, List* fargs, List* fargnames, int
  */
 void make_fn_arguments(ParseState* pstate, List* fargs, Oid* actual_arg_types, Oid* declared_arg_types)
 {
-    ListCell* current_fargs = NULL;
-    int i = 0;
+    ListCell* current_fargs = NULL;  // 定义一个指向参数列表的当前元素的指针
+    int i = 0;                       // 初始化一个计数器，用于跟踪当前处理的参数位置
 
     foreach (current_fargs, fargs) {
         /* types don't match? then force coercion using a function call... */
         if (actual_arg_types[i] != declared_arg_types[i]) {
-            Node* node = (Node*)lfirst(current_fargs);
+            Node* node = (Node*)lfirst(current_fargs);  // 获取当前参数的表达式
 
             /*
              * If arg is a NamedArgExpr, coerce its input expr instead --- we
@@ -1918,7 +1959,7 @@ static Oid FuncNameAsType(List* funcname)
      * temp_ok=false protects the <refsect1 id="sql-createfunction-security">
      * contract for writing SECURITY DEFINER functions safely.
      */
-#ifdef ENABLE_MULTIPLE_NODES
+#ifdef ENABLE_MULTIPLE_NODES  // 如果启用了多节点支持
     typtup = LookupTypeName(NULL, makeTypeNameFromNameList(funcname), NULL);
 #else
     typtup = LookupTypeNameExtended(NULL, makeTypeNameFromNameList(funcname), NULL, false);
@@ -1926,6 +1967,7 @@ static Oid FuncNameAsType(List* funcname)
     if (typtup == NULL)
         return InvalidOid;
 
+    // 判断类型是否已经定义，判断类型是否不是 shell 类型
     if (((Form_pg_type)GETSTRUCT(typtup))->typisdefined && !OidIsValid(typeTypeRelid(typtup)))
         result = typeTypeId(typtup);
     else
@@ -2012,15 +2054,15 @@ static Node* ParseComplexProjection(ParseState* pstate, char* funcname, Node* fi
 const char* funcname_signature_string(const char* funcname, int nargs, List* argnames, const Oid* argtypes)
 {
     StringInfoData argbuf;
-    int numposargs;
-    ListCell* lc = NULL;
+    int numposargs;       // 存储未命名参数的数量
+    ListCell* lc = NULL;  // 遍历 argnames 的列表指针
     int i;
 
-    initStringInfo(&argbuf);
+    initStringInfo(&argbuf);  // 初始化 StringInfoData 结构体，用于构建字符串
 
-    appendStringInfo(&argbuf, "%s(", funcname);
+    appendStringInfo(&argbuf, "%s(", funcname);  // 将函数名称追加到字符串中
 
-    numposargs = nargs - list_length(argnames);
+    numposargs = nargs - list_length(argnames);  // 计算未命名参数的数量
     lc = list_head(argnames);
 
     for (i = 0; i < nargs; i++) {
@@ -2062,6 +2104,7 @@ Oid LookupFuncName(List* funcname, int nargs, const Oid* argtypes, bool noError)
 {
     FuncCandidateList clist;
 
+    // 获取与给定函数名和参数类型匹配的函数候选列表
     clist = FuncnameGetCandidates(funcname, nargs, NIL, false, false, false);
 
     while (clist) {
@@ -2071,6 +2114,7 @@ Oid LookupFuncName(List* funcname, int nargs, const Oid* argtypes, bool noError)
                 clist->args[i] = cl_get_input_param_original_type(clist->oid, i);
             }
         }
+        // 检查当前候选函数的参数类型是否与给定参数类型匹配，同时验证该候选函数是否具有有效的OID
         if (memcmp(argtypes, clist->args, nargs * sizeof(Oid)) == 0 && OidIsValid(clist->oid))
             return clist->oid;
         clist = clist->next;
@@ -2112,9 +2156,9 @@ Oid LookupFuncNameTypeNames(List* funcname, List* argtypes, bool noError)
     Oid argoids[FUNC_MAX_ARGS];
     int argcount;
     int i;
-    ListCell* args_item = NULL;
+    ListCell* args_item = NULL;  // 指向列表元素的指针
 
-    argcount = list_length(argtypes);
+    argcount = list_length(argtypes);  // 参数类型列表的长度，即参数的数量
     if (argcount > FUNC_MAX_ARGS)
         ereport(ERROR,
             (errcode(ERRCODE_TOO_MANY_ARGUMENTS),
@@ -2127,10 +2171,11 @@ Oid LookupFuncNameTypeNames(List* funcname, List* argtypes, bool noError)
     for (i = 0; i < argcount; i++) {
         TypeName* t = (TypeName*)lfirst(args_item);
 
-        argoids[i] = LookupTypeNameOid(t);
-        args_item = lnext(args_item);
+        argoids[i] = LookupTypeNameOid(t);  // 获取类型的 OID，并存储到数组 argoids 中
+        args_item = lnext(args_item);  // 移动到下一个列表元素
     }
 
+    // 传入函数名、参数数量和参数类型的 OID 数组，进行函数的查找，并返回函数的 OID
     return LookupFuncName(funcname, argcount, argoids, noError);
 }
 
@@ -2206,7 +2251,7 @@ Oid LookupAggNameTypeNames(List* aggname, List* argtypes, bool noError)
     HeapTuple ftup;
     Form_pg_proc pform;
 
-    argcount = list_length(argtypes);
+    argcount = list_length(argtypes);  // 获取参数数量
     if (argcount > FUNC_MAX_ARGS)
         ereport(ERROR,
             (errcode(ERRCODE_TOO_MANY_ARGUMENTS),
@@ -2216,6 +2261,7 @@ Oid LookupAggNameTypeNames(List* aggname, List* argtypes, bool noError)
                     FUNC_MAX_ARGS)));
 
     i = 0;
+    // 遍历参数类型列表，将类型转换为 OID 并存储到 argoids 数组中
     foreach (lc, argtypes) {
         TypeName* t = (TypeName*)lfirst(lc);
 
@@ -2223,8 +2269,9 @@ Oid LookupAggNameTypeNames(List* aggname, List* argtypes, bool noError)
         i++;
     }
 
-    oid = LookupFuncName(aggname, argcount, argoids, true);
+    oid = LookupFuncName(aggname, argcount, argoids, true);  // 查找聚合函数的 OID
 
+    // 如果找不到聚合函数，根据是否允许无错误模式来抛出错误或返回无效 OID
     if (!OidIsValid(oid)) {
         if (noError)
             return InvalidOid;
@@ -2239,11 +2286,14 @@ Oid LookupAggNameTypeNames(List* aggname, List* argtypes, bool noError)
     }
 
     /* Make sure it's an aggregate */
+    // 使用函数的 OID 在系统缓存中搜索函数的元组信息
     ftup = SearchSysCache1(PROCOID, ObjectIdGetDatum(oid));
+    // 如果未找到有效的函数元组，抛出错误
     if (!HeapTupleIsValid(ftup)) /* should not happen */
         ereport(ERROR, (errcode(ERRCODE_CACHE_LOOKUP_FAILED), errmsg("cache lookup failed for function %u", oid)));
 
     pform = (Form_pg_proc)GETSTRUCT(ftup);
+    // 如果函数不是聚合函数，根据是否允许无错误模式来抛出错误或返回无效 OID
     if (!pform->proisagg) {
         ReleaseSysCache(ftup);
         if (noError)
@@ -2256,7 +2306,7 @@ Oid LookupAggNameTypeNames(List* aggname, List* argtypes, bool noError)
 
     ReleaseSysCache(ftup);
 
-    return oid;
+    return oid;  // 返回找到的聚合函数的 OID
 }
 
 // fetch default args if caller wants 'em
@@ -2282,24 +2332,29 @@ static List* GetDefaultVale(Oid funcoid, const int* argnumbers, int ndargs)
     int counter2 = 0;
     int pos = 0;
 
+    // 如果参数数量为 0，则直接返回空的默认参数列表
     if (0 == ndargs)
         return defaults;
 
+    // 使用函数的 ID 在系统缓存中搜索函数的元组信息
     tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(funcoid));
+    // 如果未找到有效的函数元组，抛出错误并返回空的默认参数列表
     if (!HeapTupleIsValid(tuple)) {
         ereport(
             ERROR, (errcode(ERRCODE_UNDEFINED_FUNCTION), errmsg("cache lookup failed for function \"%u\"", funcoid)));
         return defaults;
     }
 
+    // 获取函数的参数信息
     pronallargs = get_func_arg_info(tuple, &argtypes, &argnames, &argmodes);
-    formproc = (Form_pg_proc)GETSTRUCT(tuple);
-    pronargs = formproc->pronargs;
-    pronargdefaults = formproc->pronargdefaults;
+    formproc = (Form_pg_proc)GETSTRUCT(tuple);  // 获取函数元组的 Form_pg_proc 结构体
+    pronargs = formproc->pronargs;  // 获取函数的参数数量
+    pronargdefaults = formproc->pronargdefaults;  // 获取函数的默认参数数量
+    // 获取函数默认参数的数据
     proargdefaults = SysCacheGetAttr(PROCOID, tuple, Anum_pg_proc_proargdefaults, &isnull);
     AssertEreport(!isnull, MOD_OPT, "");
-    defaultsstr = TextDatumGetCString(proargdefaults);
-    defaults = (List*)stringToNode(defaultsstr);
+    defaultsstr = TextDatumGetCString(proargdefaults);  // 将默认参数数据转换为字符串表示
+    defaults = (List*)stringToNode(defaultsstr);  // 将字符串表示转换为链表结构
     AssertEreport(IsA(defaults, List), MOD_OPT, "");
     pfree_ext(defaultsstr);
 
@@ -2382,22 +2437,31 @@ static List* GetDefaultVale(Oid funcoid, const int* argnumbers, int ndargs)
  */
 static Oid cl_get_input_param_original_type(Oid func_id, int argno)
 {
+    // 使用函数的 ID 在系统缓存中搜索加密过的函数信息
     HeapTuple gs_oldtup = SearchSysCache1(GSCLPROCID, ObjectIdGetDatum(func_id));
-    Oid ret = InvalidOid;
+    Oid ret = InvalidOid;  // 存储原始数据类型的 OID
+    // 检查通过函数 ID 检索到的缓存条目是否有效
     if (HeapTupleIsValid(gs_oldtup)) {
-        bool isnull = false;
+        bool isnull = false;  // 指示是否检索到了有效的列
+        // 从缓存中获取加密函数的参数缓存列信息
         oidvector* proargcachedcol = (oidvector*)DatumGetPointer(
             SysCacheGetAttr(GSCLPROCID, gs_oldtup, Anum_gs_encrypted_proc_proargcachedcol, &isnull));
+        // 检查参数缓存列是否有效，并且参数序号是否在有效范围内
         if (!isnull && proargcachedcol->dim1 > argno) {
+            // 从参数缓存列中获取指定序号的列 ID
             Oid cachedColId = proargcachedcol->values[argno];
+            // 使用列 ID 在系统缓存中搜索加密列的信息
             HeapTuple tup = SearchSysCache1(CEOID, ObjectIdGetDatum(cachedColId));
+            // 检查通过列 ID 检索到的缓存条目是否有效
             if (HeapTupleIsValid(tup)) {
+                // 获取加密列的元组形式
                 Form_gs_encrypted_columns ec_form = (Form_gs_encrypted_columns)GETSTRUCT(tup);
+                // 从元组中获取加密列的原始数据类型的 OID
                 ret = ec_form->data_type_original_oid;
-                ReleaseSysCache(tup);
+                ReleaseSysCache(tup);  // 释放列信息的系统缓存
             }
         }
-        ReleaseSysCache(gs_oldtup);
+        ReleaseSysCache(gs_oldtup);  // 释放函数信息的系统缓存
     }
     return ret;
 }

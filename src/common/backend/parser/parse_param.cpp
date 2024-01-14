@@ -64,10 +64,13 @@ static bool check_parameter_resolution_walker(Node* node, ParseState* pstate);
  */
 void parse_fixed_parameters(ParseState* pstate, Oid* paramTypes, int numParams)
 {
+    // 分配固定参数状态结构体的内存空间
     FixedParamState* parstate = (FixedParamState*)palloc(sizeof(FixedParamState));
 
+    // 设置参数类型和参数数量
     parstate->paramTypes = paramTypes;
     parstate->numParams = numParams;
+    // 设置解析器状态的引用钩子状态和参数引用钩子
     pstate->p_ref_hook_state = (void*)parstate;
     pstate->p_paramref_hook = fixed_paramref_hook;
     /* no need to use p_coerce_param_hook */
@@ -82,6 +85,7 @@ void parse_variable_parameters(ParseState* pstate, Oid** paramTypes, int* numPar
 
     parstate->paramTypes = paramTypes;
     parstate->numParams = numParams;
+    // 设置解析器状态的引用钩子状态和参数引用钩子以及参数强制转换钩子
     pstate->p_ref_hook_state = (void*)parstate;
     pstate->p_paramref_hook = variable_paramref_hook;
     pstate->p_coerce_param_hook = variable_coerce_param_hook;
@@ -92,7 +96,9 @@ void parse_variable_parameters(ParseState* pstate, Oid** paramTypes, int* numPar
  */
 static Node* fixed_paramref_hook(ParseState* pstate, ParamRef* pref)
 {
+    // 获取可变参数状态
     FixedParamState* parstate = (FixedParamState*)pstate->p_ref_hook_state;
+    // 获取参数号
     int paramno = pref->number;
     Param* param = NULL;
 
@@ -103,14 +109,21 @@ static Node* fixed_paramref_hook(ParseState* pstate, ParamRef* pref)
                 errmsg("there is no parameter $%d", paramno),
                 parser_errposition(pstate, pref->location)));
     }
+    // 创建 Param 节点
     param = makeNode(Param);
     param->paramkind = PARAM_EXTERN;
     param->paramid = paramno;
     param->paramtype = parstate->paramTypes[paramno - 1];
     param->paramtypmod = -1;
-    param->paramcollid = get_typcollation(param->paramtype);
+    // 设置参数的字符集
+    if (OidIsValid(GetCollationConnection()) && IsSupportCharsetType(param->paramtype)) {
+        param->paramcollid = GetCollationConnection();
+    } else {
+        param->paramcollid = get_typcollation(param->paramtype);
+    }
     param->location = pref->location;
     param->tableOfIndexTypeList = NULL;
+    param->is_bind_param = true;
 
     return (Node*)param;
 }
@@ -171,6 +184,7 @@ static Node* variable_paramref_hook(ParseState* pstate, ParamRef* pref)
     }
     param->location = pref->location;
     param->tableOfIndexTypeList = NULL;
+    param->is_bind_param = true;
 
     return (Node*)param;
 }
@@ -269,13 +283,16 @@ static bool check_parameter_resolution_walker(Node* node, ParseState* pstate)
     if (node == NULL) {
         return false;
     }
+    // 如果是 Param 节点
     if (IsA(node, Param)) {
         Param* param = (Param*)node;
 
+         // 如果是外部参数
         if (param->paramkind == PARAM_EXTERN) {
             VarParamState* parstate = (VarParamState*)pstate->p_ref_hook_state;
             int paramno = param->paramid;
 
+            // 检查参数号是否在合理范围内
             if (paramno <= 0 || /* shouldn't happen, but... */
                 paramno > *parstate->numParams) {
                 ereport(ERROR,
@@ -283,6 +300,7 @@ static bool check_parameter_resolution_walker(Node* node, ParseState* pstate)
                         errmsg("there is no parameter $%d", paramno),
                         parser_errposition(pstate, param->location)));
             }
+            // 检查参数类型是否匹配
             if (param->paramtype != (*parstate->paramTypes)[paramno - 1]) {
                 ereport(ERROR,
                     (errcode(ERRCODE_AMBIGUOUS_PARAMETER),
@@ -290,11 +308,14 @@ static bool check_parameter_resolution_walker(Node* node, ParseState* pstate)
                         parser_errposition(pstate, param->location)));
             }
         }
+        // 返回 false，表示继续遍历子节点
         return false;
     }
+    // 如果是 Query 节点，递归进入 RTE 子查询或者尚未计划的子链接子查询
     if (IsA(node, Query)) {
         /* Recurse into RTE subquery or not-yet-planned sublink subquery */
         return query_tree_walker((Query*)node, (bool (*)())check_parameter_resolution_walker, (void*)pstate, 0);
     }
+    // 对其他节点进行表达式树遍历
     return expression_tree_walker(node, (bool (*)())check_parameter_resolution_walker, (void*)pstate);
 }

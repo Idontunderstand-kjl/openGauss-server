@@ -86,15 +86,16 @@ extern char* nodeTagToString(NodeTag type);
  */
 static void transformMergeJoinClause(ParseState* pstate, Node* merge)
 {
-    RangeTblEntry* rte = NULL;
-    RangeTblEntry* rt_rte = NULL;
-    List* relnamespace = NIL;
-    int rtindex = 0;
-    int rt_rtindex = 0;
-    Node* n = NULL;
-    Relids containedRels = NULL;
+    RangeTblEntry* rte = NULL;      // 目标关系的范围表项
+    RangeTblEntry* rt_rte = NULL;   // 源关系的范围表项
+    List* relnamespace = NIL;       // 命名空间列表
+    int rtindex = 0;                // 目标关系的范围表索引
+    int rt_rtindex = 0;             // 源关系的范围表索引
+    Node* n = NULL;                 // 转换后的节点
+    Relids containedRels = NULL;    // 包含的关系
     Assert(IsA(merge, JoinExpr));
 
+    // 处理FROM子句的一项，获取目标关系和源关系的范围表项、索引等信息
     n = transformFromClauseItem(
         pstate, merge, &rte, &rtindex, &rt_rte, &rt_rtindex, &relnamespace, true, false, true);
     bms_free(containedRels);
@@ -128,14 +129,19 @@ static void transformMergeJoinClause(ParseState* pstate, Node* merge)
     foreach (cell1, relnamespace) {
         ParseNamespaceItem* nitem1 = (ParseNamespaceItem*)lfirst(cell1);
         RangeTblEntry* entry1 = nitem1->p_rte;
+        bool unique = true;
 
+        // 检查是否已经包含相同关系和别名的范围表项，如果不包含，则添加到p_relnamespace
         foreach (cell2, pstate->p_relnamespace) {
             ParseNamespaceItem* nitem2 = (ParseNamespaceItem*)lfirst(cell2);
             RangeTblEntry* entry2 = nitem2->p_rte;
 
-            if (entry1->relid == entry2->relid) {
-                continue;
+            if (entry1->relid == entry2->relid && strcmp(entry1->eref->aliasname, entry2->eref->aliasname) == 0) {
+                unique = false;
+                break;
             }
+        }
+        if (unique) {
             pstate->p_relnamespace = lappend(pstate->p_relnamespace, lfirst(cell1));
         }
     }
@@ -227,8 +233,14 @@ static bool find_valid_unique_constraint(Relation relation, List* colnames, List
     return false;
 }
 
+/*
+ * @Description: 检查MergeWhenClause是否为NULL，如果为NULL，则抛出错误。
+ *
+ * @in mergeWhenClause: 要检查的MergeWhenClause
+ */
 static void check_merge_when_clause(MergeWhenClause* mergeWhenClause)
 {
+    // 使用unlikely宏判断mergeWhenClause是否为NULL，如果为NULL，则抛出错误
     if (unlikely(mergeWhenClause == NULL)) {
         ereport(ERROR,
             (errcode(ERRCODE_UNEXPECTED_NULL_VALUE),
@@ -237,44 +249,63 @@ static void check_merge_when_clause(MergeWhenClause* mergeWhenClause)
     }
 }
 
+/*
+ * @Description: 将列值添加到子查询中。
+ *
+ * @in range_subselect: 范围子查询节点。
+ * @in equal_rexpr: 要添加的等式表达式节点。
+ */
 static void add_column_values_to_subquery(RangeSubselect* range_subselect, Node* equal_rexpr)
 {
+    // 将范围子查询的子查询部分强制转换为SelectStmt类型
     SelectStmt* select_stmt = (SelectStmt*)range_subselect->subquery;
+    // 检查子查询的操作是否为SETOP_NONE
     if (select_stmt->op == SETOP_NONE) {
+        // 如果子查询的值列表不为空
         if (select_stmt->valuesLists != NIL) {
+            // 遍历子查询的值列表
             for (int j = 0; j < list_length(select_stmt->valuesLists); j++) {
+                // 在值列表的每个子列表末尾添加等式表达式节点
                 lappend((List*)list_nth(select_stmt->valuesLists, j), equal_rexpr);
             }
-        } else if (select_stmt->targetList != NIL) {
+        } else if (select_stmt->targetList != NIL) {  // 如果子查询的值列表为空，但目标列表不为空
+            // 创建一个新的ResTarget节点，将等式表达式节点添加到目标列表
             ResTarget* rt = makeNode(ResTarget);
             rt->val = equal_rexpr;
             lappend(select_stmt->targetList, (Node*)rt);
-        } else {
+        } else {  // 如果子查询的值列表和目标列表都为空，则抛出错误
             ereport(ERROR,
                 (errcode(ERRCODE_UNEXPECTED_NULL_VALUE),
                     errmodule(MOD_PARSER),
                     errmsg("Subquery should at least have a target list or values list.")));
         }
     } else {
+        // 创建一个新的SelectStmt节点，操作符为SETOP_NONE
         SelectStmt* set_stmt = makeNode(SelectStmt);
         set_stmt->op = SETOP_NONE;
 
+        // 创建一个新的ResTarget节点，其值为A_Star节点，表示选择所有列
         ResTarget* rt_star = makeNode(ResTarget);
         ColumnRef* cr_star = makeNode(ColumnRef);
         cr_star->fields = list_make1((Node*)makeNode(A_Star));
         rt_star->val = (Node*)cr_star;
 
+        // 创建一个新的ResTarget节点，其值为等式表达式节点
         ResTarget* rt_expr = makeNode(ResTarget);
         rt_expr->val = equal_rexpr;
 
+        // 将两个ResTarget节点添加到SelectStmt的目标列表中
         set_stmt->targetList = list_make2((Node*)rt_star, (Node*)rt_expr);
 
+        // 创建一个新的RangeSubselect节点，其子查询为原来的SelectStmt
         RangeSubselect* subselect = makeNode(RangeSubselect);
         subselect->subquery = (Node*)select_stmt;
         Alias* alias = makeAlias("__unnamed_subquery__", NIL);
         subselect->alias = alias;
+        // 将RangeSubselect节点添加到SelectStmt的fromClause中
         set_stmt->fromClause = list_make1((Node*)subselect);
 
+        // 将新的SelectStmt节点设置为范围子查询的子查询
         range_subselect->subquery = (Node*)set_stmt;
     }
 }
@@ -452,8 +483,19 @@ void fill_join_expr(ParseState* pstate, MergeStmt* stmt)
     stmt->join_condition = (Node*)copyObject(or_expr);
 }
 
+/*
+ * @Description: 检查目标列的数量是否符合预期。
+ *
+ * @in target_list_length: 目标列列表的长度。
+ * @in mergeWhenClause: MergeWhenClause节点，包含了INSERT的列信息。
+ * @in rel_valid_cols: 目标关系的有效列列表。
+ */
 static void check_columns_count(int target_list_length, MergeWhenClause* mergeWhenClause, List* rel_valid_cols)
 {
+    /* 如果目标列列表为空，或者（当MergeWhenClause的cols为空且目标关系的有效列数量
+     * 小于目标列列表的长度），或者（当MergeWhenClause的cols不为空且MergeWhenClause的
+     * cols列表长度不等于目标列列表的长度），则抛出错误。
+     */
     if (target_list_length == 0 ||
         ((mergeWhenClause->cols == NIL) && (list_length(rel_valid_cols) < target_list_length)) ||
         ((mergeWhenClause->cols != NIL) && (list_length(mergeWhenClause->cols) != target_list_length))) {
@@ -464,6 +506,14 @@ static void check_columns_count(int target_list_length, MergeWhenClause* mergeWh
     }
 }
 
+/*
+ * @Description: 检查MergeWhenClause是否包含默认值。
+ *
+ * @in mergeWhenClause: MergeWhenClause节点，包含了INSERT的列信息。
+ * @in pstate: ParseState用于解析和转换SQL语句。
+ * @in rel_valid_attrnos: 目标关系的有效列编号列表。
+ * @in range_subselect: 与目标关系关联的子查询。
+ */
 static void check_contain_default(
     MergeWhenClause* mergeWhenClause, ParseState* pstate, List* rel_valid_attrnos, RangeSubselect* range_subselect)
 {
@@ -485,6 +535,7 @@ static void check_contain_default(
         Node* expr = NULL;
         SelectStmt* select_stmt = NULL;
         List* select_value_list = NIL;
+        // 为每个有效列构建一个默认值表达式，或者NULL
         foreach (cell, rel_valid_attrnos) {
             attrno = lfirst_int(cell);
             expr = build_column_default((Relation)linitial(pstate->p_target_relation), attrno, false);
@@ -493,9 +544,11 @@ static void check_contain_default(
             }
             select_value_list = lappend(select_value_list, expr);
         }
+        // 创建一个SELECT语句，valuesLists中包含了INSERT目标列的默认值
         select_stmt = makeNode(SelectStmt);
         select_stmt->valuesLists = list_make1(select_value_list);
         select_stmt->op = SETOP_NONE;
+        // 将子查询与SELECT语句关联
         range_subselect->subquery = (Node*)select_stmt;
     }
 }
@@ -637,6 +690,12 @@ void fix_merge_stmt_for_insert_update(ParseState* pstate, MergeStmt* stmt)
     fill_join_expr(pstate, stmt);
 }
 
+/*
+ * @Description: 设置额外更新的列，记录生成列引用的已更新基本列。
+ *
+ * @in target_rte: 目标表的RangeTblEntry。
+ * @in tupdesc: 目标表的TupleDesc。
+ */
 void setExtraUpdatedCols(RangeTblEntry* target_rte, TupleDesc tupdesc)
 {
     /*
@@ -659,6 +718,7 @@ void setExtraUpdatedCols(RangeTblEntry* target_rte, TupleDesc tupdesc)
             expr = (Node *)stringToNode(defval.adbin);
             pull_varattnos(expr, 1, &attrs_used);
 
+            // 如果生成列引用的列与目标表的已更新列有交集，则将其添加到extraUpdatedCols中
             if (bms_overlap(target_rte->updatedCols, attrs_used))
                 target_rte->extraUpdatedCols = bms_add_member(target_rte->extraUpdatedCols,
                                                defval.adnum - FirstLowInvalidHeapAttributeNumber);
@@ -678,6 +738,7 @@ static List* transformUpdateTargetList(ParseState* pstate, List* origTlist)
     ListCell* tl = NULL;
     Relation targetrel = (Relation)linitial(pstate->p_target_relation);
 
+    // 转换目标列表
     tlist = transformTargetList(pstate, origTlist, EXPR_KIND_UPDATE_SOURCE);
 
     /* Prepare to assign non-conflicting resnos to resjunk attributes */
@@ -710,6 +771,7 @@ static List* transformUpdateTargetList(ParseState* pstate, List* origTlist)
         origTarget = (ResTarget*)lfirst(origTargetList);
         Assert(IsA(origTarget, ResTarget));
 
+        // 获取目标列的列号
         attrno = attnameAttNum(targetrel, origTarget->name, true);
         if (attrno == InvalidAttrNumber) {
             if (!origTarget->indirection) {
@@ -730,6 +792,7 @@ static List* transformUpdateTargetList(ParseState* pstate, List* origTlist)
                         parser_errposition(pstate, origTarget->location)));
             }
         }
+        // 更新目标列表项
         updateTargetListEntry(pstate, tle, origTarget->name, attrno, origTarget->indirection, origTarget->location,
             (Relation)linitial(pstate->p_target_relation), target_rte);
 
@@ -837,14 +900,24 @@ static Query* tryTransformMergeInsertStmt(ParseState* pstate, MergeStmt* stmt)
     return insert_query;
 }
 
+/*
+ * @Description: 递归遍历表达式树，检查是否包含子查询(SubLink)。
+ *
+ * @in node: 表达式树节点。
+ * @in context: 上下文信息。
+ * @return: 如果包含子查询，返回true；否则返回false。
+ */
 bool contain_subquery_walker(Node* node, void* context)
 {
+    // 节点为空，不包含子查询
     if (node == NULL) {
         return false;
     }
+    // 节点为子查询(SubLink)，包含子查询
     if (IsA(node, SubLink)) {
         return true;
     }
+    // 递归调用表达式树遍历函数
     return expression_tree_walker(node, (bool (*)())contain_subquery_walker, (void*)context);
 }
 #ifdef ENABLE_MULTIPLE_NODES
@@ -884,6 +957,7 @@ List* get_varnamespace(ParseState* pstate, int idx = 0)
     int cur_idx = 1;
     foreach (lc, pstate->p_rtable) {
         RangeTblEntry* rte = (RangeTblEntry*)lfirst(lc);
+        // 仅处理关系表和子查询表项
         if (rte->rtekind != RTE_RELATION && rte->rtekind != RTE_SUBQUERY) {
             continue;
         }
@@ -1408,19 +1482,23 @@ static List* expandSourceTL(ParseState* pstate, RangeTblEntry* rte, int rtindex)
     ListCell* var = NULL;
     List* te_list = NIL;
 
+    // 调用 expandRTE 函数扩展范围表项
     expandRTE(rte, rtindex, 0, -1, false, &names, &vars);
 
     /* Require read access to the table. */
     rte->requiredPerms |= ACL_SELECT;
 
+    // 遍历属性名和 Var 节点列表，构建 TargetEntry 列表
     forboth(name, names, var, vars)
     {
         char* label = strVal(lfirst(name));
         Var* varnode = (Var*)lfirst(var);
         TargetEntry* te = NULL;
 
+        // 创建 TargetEntry 节点
         te = makeTargetEntry((Expr*)varnode, (AttrNumber)pstate->p_next_resno++, label, false);
 
+        // 将 TargetEntry 添加到列表中
         te_list = lappend(te_list, te);
     }
 
@@ -1429,6 +1507,13 @@ static List* expandSourceTL(ParseState* pstate, RangeTblEntry* rte, int rtindex)
     return te_list;
 }
 
+/*
+ * @Description: 将目标关系扩展以包含目标表项的所有属性。
+ *
+ * @in te_list: 目标项(TargetEntry)列表
+ * @in parsetree: 解析树
+ * @return: 扩展后的目标项(TargetEntry)列表
+ */
 List* expandTargetTL(List* te_list, Query* parsetree)
 {
     List* names = NIL;
@@ -1458,6 +1543,13 @@ List* expandTargetTL(List* te_list, Query* parsetree)
     return te_list;
 }
 
+/*
+ * @Description: 将 MERGE 语句的操作项(TargetEntry)列表扩展并添加到现有列表中。
+ *
+ * @in te_list: 目标项(TargetEntry)列表。
+ * @in parsetree: 解析树。
+ * @return: 扩展后的目标项(TargetEntry)列表。
+ */
 List* expandActionTL(List* te_list, Query* parsetree)
 {
     ListCell* lc = NULL;
@@ -1465,15 +1557,18 @@ List* expandActionTL(List* te_list, Query* parsetree)
     List* mergeActionList = parsetree->mergeActionList;
     AttrNumber resno = list_length(parsetree->targetList) + 1;
 
+    // 遍历 MERGE 语句的操作项列表
     foreach (lc, mergeActionList) {
         int target_idx = 0;
         MergeAction* action = (MergeAction*)lfirst(lc);
+        // 遍历操作项的目标项(TargetEntry)列表
         foreach (llc, action->targetList) {
             target_idx++;
             TargetEntry* oldte = (TargetEntry*)lfirst(llc);
             char label[100] = {0};
             errno_t sret;
 
+            // 构建新的 TargetEntry 节点的标签
             sret = snprintf_s(label,
                 sizeof(label),
                 sizeof(label) - 1,
@@ -1500,10 +1595,13 @@ List* expandQualTL(List* te_list, Query* parsetree)
     List* mergeActionList = parsetree->mergeActionList;
     AttrNumber resno = list_length(parsetree->targetList) + 1;
 
+    // 遍历 MERGE 语句的操作项列表
     foreach (lc, mergeActionList) {
         int target_idx = 0;
         MergeAction* action = (MergeAction*)lfirst(lc);
+         // 提取条件表达式中的变量列表
         List* vars_on_qual = pull_var_clause((Node*)action->qual, PVC_INCLUDE_AGGREGATES, PVC_INCLUDE_PLACEHOLDERS);
+        // 遍历条件表达式中的变量列表
         foreach (llc, vars_on_qual) {
             Var* var = (Var*)lfirst(llc);
             char label[100] = {0};
@@ -1528,6 +1626,14 @@ List* expandQualTL(List* te_list, Query* parsetree)
     return te_list;
 }
 
+/*
+ * @Description: 检查 UPDATE 操作是否涉及 JOIN 条件中的列。
+ *
+ * @in pstate: 解析状态。
+ * @in clause: 当前 MERGE 语句的操作条件。
+ * @in join_var_list: JOIN 条件中的变量列表。
+ * @in is_insert_update: 是否是 INSERT ... ON CONFLICT ... DO UPDATE 操作。
+ */
 static void checkUpdateOnJoinKey(
     ParseState* pstate, MergeWhenClause* clause, List* join_var_list, bool is_insert_update)
 {
@@ -1535,6 +1641,7 @@ static void checkUpdateOnJoinKey(
     ListCell* join_var_cell = NULL;
     Relation targetrel = (Relation)linitial(pstate->p_target_relation);
 
+    // 遍历 UPDATE 操作的目标列列表
     foreach (update_target_cell, clause->targetList) {
         ResTarget* origTarget = (ResTarget*)lfirst(update_target_cell);
         Assert(IsA(origTarget, ResTarget));
@@ -1573,6 +1680,11 @@ static void checkUpdateOnJoinKey(
     }
 }
 
+/*
+ * @Description: 检查源表是否是复制表。
+ *
+ * @in source_relation: 源表关系节点。
+ */
 static void check_source_table_replicated(Node* source_relation)
 {
     Assert(IsA(source_relation, RangeSubselect));
@@ -1596,6 +1708,12 @@ static void check_source_table_replicated(Node* source_relation)
                    "in INSERT ... ON DUPLICATE KEY UPDATE.")));
 }
 
+/*
+ * @Description: 检查目标表是否为复制表。
+ *
+ * @param rte: 目标表的 RangeTblEntry。
+ * @return: 如果目标表为复制表，则返回 true；否则返回 false。
+ */
 static bool checkTargetTableReplicated(RangeTblEntry* rte)
 {
     RelationLocInfo* rel_loc_info = NULL;
@@ -1620,8 +1738,14 @@ static bool checkTargetTableReplicated(RangeTblEntry* rte)
     return false;
 }
 
+/*
+ * @Description: 检查目标表是否为系统目录表，并确保系统表的修改权限。
+ *
+ * @param targetRel: 目标表的 Relation 结构。
+ */
 static void checkTargetTableSystemCatalog(Relation targetRel)
 {
+    // 如果在后台进程中，并且不允许系统表修改，则抛出错误
     if (IsUnderPostmaster && !g_instance.attr.attr_common.allowSystemTableMods && IsSystemRelation(targetRel)) {
         ereport(ERROR,
             (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
@@ -1629,6 +1753,12 @@ static void checkTargetTableSystemCatalog(Relation targetRel)
     }
 }
 
+/*
+ * @Description: 检查目标表的列是否满足要求，包括验证 INSERT 或 UPDATE 操作的列是否有效，以及检查列的默认值是否稳定。
+ *
+ * @param pstate: 解析状态。
+ * @param is_insert_update: 操作类型，是 INSERT 或 UPDATE 操作。
+ */
 static void check_target_table_columns(ParseState* pstate, bool is_insert_update)
 {
     List* rel_valid_cols = NIL;
@@ -1637,12 +1767,17 @@ static void check_target_table_columns(ParseState* pstate, bool is_insert_update
     Node* expr = NULL;
     ListCell* cell = NULL;
 
+    // 获取目标表的 Relation 结构
     Relation target_relation = (Relation)linitial(pstate->p_target_relation);
+    // 验证 INSERT 或 UPDATE 操作的目标列是否有效，获取有效列的信息
     rel_valid_cols = checkInsertTargets(pstate, NIL, &rel_valid_attrnos);
 
+    // 遍历有效列的属性号列表
     foreach (cell, rel_valid_attrnos) {
         attrno = lfirst_int(cell);
+        // 构建列的默认值表达式
         expr = build_column_default(target_relation, attrno, false);
+        // 检查默认值是否包含不稳定的函数
         if ((expr != NULL) && (contain_volatile_functions(expr))) {
             ereport(ERROR,
                 (errmodule(MOD_PARSER),
@@ -1654,9 +1789,16 @@ static void check_target_table_columns(ParseState* pstate, bool is_insert_update
                         NameStr(target_relation->rd_att->attrs[attrno - 1].attname))));
         }
     }
+    // 释放有效列的信息
     list_free_deep(rel_valid_cols);
 }
 
+/*
+ * @Description: 检查是否在分布式表的分布键上执行了更新操作。
+ *
+ * @param rte: RangeTblEntry 结构，表示目标表。
+ * @param targetlist: 更新操作的目标列表。
+ */
 static void checkUpdateOnDistributeKey(RangeTblEntry* rte, List* targetlist)
 {
     RelationLocInfo* rel_loc_info = NULL;
@@ -1707,6 +1849,7 @@ static void checkUpdateOnDistributeKey(RangeTblEntry* rte, List* targetlist)
         }
     }
 }
+}
 
 /*
  * cannot reference system column in
@@ -1730,20 +1873,36 @@ static void check_system_column_reference(List* joinVarList, List* mergeActionLi
     check_system_column_varlist(joinVarList, is_insert_update);
 }
 
+/*
+ * @Description: 检查是否包含系统列的节点。
+ *
+ * @param node: 待检查的节点。
+ * @param is_insert_update: 是否是 INSERT ... ON DUPLICATE KEY UPDATE 操作。
+ */
 static void check_system_column_node(Node* node, bool is_insert_update)
 {
+    // 提取节点中的变量列表
     List* vars = pull_var_clause(node, PVC_RECURSE_AGGREGATES, PVC_RECURSE_PLACEHOLDERS);
 
+    // 对变量列表进行检查
     check_system_column_varlist(vars, is_insert_update);
 }
 
+/*
+ * @Description: 检查是否包含系统列的变量列表。
+ *
+ * @param varlist: 待检查的变量列表。
+ * @param is_insert_update: 是否是 INSERT ... ON DUPLICATE KEY UPDATE 操作。
+ */
 static void check_system_column_varlist(List* varlist, bool is_insert_update)
 {
     ListCell* lc = NULL;
 
+    /* 遍历变量列表 */
     foreach (lc, varlist) {
         Var* var = (Var*)lfirst(lc);
 
+        /* 检查变量是否引用了系统列 */
         if (var->varattno < 0) {
             ereport(ERROR,
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -1771,22 +1930,42 @@ static bool var_in_list(Var* var, List* list)
     return found;
 }
 
+/*
+ * @Description: 将两个表达式合并成一个新的表达式。
+ *
+ * @param expr1: 第一个表达式。
+ * @param expr2: 第二个表达式。
+ * @param kind: 表达式的类型。
+ *
+ * @return: 合并后的新表达式。
+ */
 static Node* append_expr(Node* expr1, Node* expr2, A_Expr_Kind kind)
 {
+    /* 如果第一个表达式为空，直接使用第二个表达式 */
     if (expr1 == NULL) {
         expr1 = expr2;
-    } else if (expr2 != NULL) {
+    } else if (expr2 != NULL) {   /* 如果第二个表达式不为空，使用指定类型的新表达式合并两个表达式 */
         expr1 = (Node*)makeA_Expr(kind, NIL, expr1, expr2, -1);
     }
     return expr1;
 }
 
+/*
+ * @Description: 根据列名列表获取关系中相应列的位图集合。
+ *
+ * @param relation: 目标关系。
+ * @param colnames: 列名列表。
+ *
+ * @return: 包含关系中指定列的位图集合。
+ */
 static Bitmapset* get_relation_attno_bitmap_by_names(Relation relation, List* colnames)
 {
     Bitmapset* bitmap = NULL;
     ListCell* cell = NULL;
     int attrno = 0;
+    // 遍历列名列表
     foreach (cell, colnames) {
+        // 获取列在关系中的序号
         attrno = attnameAttNum(relation, strVal(lfirst(cell)), false);
         /* check for non-exist column */
         if (attrno == InvalidAttrNumber) {
@@ -1804,18 +1983,27 @@ static Bitmapset* get_relation_attno_bitmap_by_names(Relation relation, List* co
                     errmodule(MOD_OPT_REWRITE),
                     errmsg("column \"%s\" specified more than once", strVal(lfirst(cell)))));
         }
+        // 将列序号添加到位图集合中
         bitmap = bms_add_member(bitmap, attrno);
     }
     return bitmap;
 }
 
+/*
+ * @Description: 获取关系中具有默认值的列的位图集合。
+ *
+ * @param relation: 目标关系。
+ *
+ * @return: 包含关系中具有默认值的列的位图集合。
+ */
 static Bitmapset* get_relation_default_attno_bitmap(Relation relation)
 {
     Bitmapset* bitmap = NULL;
     Form_pg_attribute attr = NULL;
+    // 遍历关系的所有列
     for (int i = 0; i < RelationGetNumberOfAttributes(relation); i++) {
         attr = &relation->rd_att->attrs[i];
-
+        // 如果列有默认值且没有被删除，则将其列序号添加到位图集合中
         if (attr->atthasdef && !attr->attisdropped) {
             bitmap = bms_add_member(bitmap, attr->attnum);
         }
@@ -1823,11 +2011,21 @@ static Bitmapset* get_relation_default_attno_bitmap(Relation relation)
     return bitmap;
 }
 
+/*
+ * @Description: 从 MERGE 语句的 WHEN 子句列表中获取特定类型和匹配状态的子句。
+ *
+ * @param mergeWhenClauses: MERGE 语句的 WHEN 子句列表。
+ * @param cmd_type: 当前操作的命令类型（如 CMD_INSERT）。
+ * @param matched: 是否是匹配状态（TRUE 表示匹配，FALSE 表示不匹配）。
+ *
+ * @return: 符合条件的 MERGE WHEN 子句，如果不存在则返回 NULL。
+ */
 static MergeWhenClause* get_merge_when_clause(List* mergeWhenClauses, CmdType cmd_type, bool matched)
 {
     /* find the WHEN NOT MATCHED INSERT clause */
     MergeWhenClause* mergeWhenClause = NULL;
     ListCell* cell = NULL;
+    // 遍历 WHEN 子句列表，找到匹配的子句
     foreach (cell, mergeWhenClauses) {
         mergeWhenClause = (MergeWhenClause*)lfirst(cell);
         if ((mergeWhenClause->commandType == cmd_type) && (mergeWhenClause->matched == matched)) {
@@ -1837,6 +2035,14 @@ static MergeWhenClause* get_merge_when_clause(List* mergeWhenClauses, CmdType cm
     return mergeWhenClause;
 }
 
+/*
+ * @Description: 从可能包含 UNION、INTERSECT、EXCEPT 操作的 SelectStmt 树中获取有效的 SelectStmt。
+ *
+ * @param node: 输入的 SelectStmt 树。
+ *
+ * @return: 返回有效的 SelectStmt。如果输入的 SelectStmt 树没有 UNION、INTERSECT、EXCEPT 操作，
+ *          则直接返回该节点；否则，只检查其左（larg）节点，因为这些操作符的右节点是可选的。
+ */
 static SelectStmt* get_valid_select_stmt(SelectStmt* node)
 {
     Assert(node != NULL);
@@ -1849,18 +2055,28 @@ static SelectStmt* get_valid_select_stmt(SelectStmt* node)
     }
 }
 
+/*
+ * @Description: 统计查询的目标列数量，支持处理带有 UNION、INTERSECT、EXCEPT 操作的 SelectStmt。
+ *
+ * @param query: 输入的查询节点，可以是 SelectStmt 或其它查询类型。
+ *
+ * @return: 返回查询的目标列数量。
+ */
 static int count_target_columns(Node* query)
 {
     int cols_count = 0;
     List* target_list = NIL;
     SelectStmt* select_stmt = NULL;
 
+    // 检查输入节点是否是 SelectStmt 类型
     if (IsA(query, SelectStmt)) {
+        // 获取有效的 SelectStmt 树，去除 UNION、INTERSECT、EXCEPT 操作
         select_stmt = get_valid_select_stmt((SelectStmt*)query);
+        // 检查是否有 VALUES 子句
         if (select_stmt->valuesLists != NIL) {
             target_list = (List*)linitial(select_stmt->valuesLists);
             cols_count = list_length(target_list);
-        } else if (select_stmt->targetList != NIL) {
+        } else if (select_stmt->targetList != NIL) {   // 检查是否有普通的 targetList
             ListCell* cell = NULL;
             ParseState* pstate = NULL;
             SelectStmt* stmt = NULL;
@@ -1872,6 +2088,7 @@ static int count_target_columns(Node* query)
 
             pstate->p_resolve_unknowns = true;
             query = transformStmt(pstate, (Node*)stmt);
+            // 查询不能为空，至少应该有一个目标列
             if (query == NULL) {
                 ereport(ERROR,
                     (errcode(ERRCODE_UNDEFINED_COLUMN),
@@ -1888,13 +2105,13 @@ static int count_target_columns(Node* query)
                     cols_count--;
             }
             free_parsestate(pstate);
-        } else {
+        } else {   // 如果没有 VALUES 子句也没有 targetList，则报错
             ereport(ERROR,
                 (errcode(ERRCODE_UNDEFINED_COLUMN),
                     errmodule(MOD_PARSER),
                     errmsg("Subquery should at least have a target column.")));
         }
-    } else {
+    } else {  // 如果不是 SelectStmt 类型，则报错
         ereport(ERROR,
             (errmodule(MOD_PARSER),
                 errcode(ERRCODE_UNRECOGNIZED_NODE_TYPE),
@@ -1917,19 +2134,31 @@ bool check_unique_constraint(List*& index_list)
     /* check if there are any primary or unique index */
     IndexInfo* index_info = NULL;
 
+    // 从列表的末尾开始遍历，以便在删除元素时不影响后续元素的索引
     for (int i = list_length(index_list) - 1; i >= 0; i--) {
         index_info = (IndexInfo*)list_nth(index_list, i);
+        // 如果不是唯一索引，则从列表中移除
         if (!index_info->ii_Unique) {
             index_list = RemoveListCell(index_list, i + 1);
         }
     }
 
+    // 如果最终的唯一索引列表为空，则返回 false
     if (list_length(index_list) == 0) {
         return false;
     }
     return true;
 }
 
+/*
+ * @Description: 检查动作目标列表中的条件。
+ *
+ * @param action_targetlist: 动作目标列表。
+ * @param source_targetlist: 源目标列表。
+ * @param condition_in: 条件是否存在的标志（true表示存在，false表示不存在）。
+ *
+ * @return: 如果条件满足，则返回 true。
+ */
 bool check_action_targetlist_condition(List* action_targetlist, List* source_targetlist, bool condition_in)
 {
     ListCell* var_cell = NULL;
@@ -1944,6 +2173,7 @@ bool check_action_targetlist_condition(List* action_targetlist, List* source_tar
         pull_var_clause((Node*)source_targetlist, PVC_RECURSE_AGGREGATES, PVC_RECURSE_PLACEHOLDERS);
     foreach (var_cell, vars_list) {
         Var* var = (Var*)lfirst(var_cell);
+        // 检查变量是否存在于源变量列表中，根据条件决定是否相等
         if (var_in_list(var, source_vars_list) != condition_in) {
             return false;
         }
@@ -1951,6 +2181,14 @@ bool check_action_targetlist_condition(List* action_targetlist, List* source_tar
     return true;
 }
 
+/*
+ * @Description: 检查更新动作的目标列表。
+ *
+ * @param merge_action_list: MERGE 语句的动作列表。
+ * @param source_targetlist: 源目标列表。
+ *
+ * @return: 如果更新动作的目标列表与源目标列表的条件不满足，则返回 true。
+ */
 bool check_update_action_targetlist(List* merge_action_list, List* source_targetlist)
 {
     ListCell* action_cell = NULL;
@@ -1966,10 +2204,17 @@ bool check_update_action_targetlist(List* merge_action_list, List* source_target
         }
     }
 
+    // 检查更新动作的目标列表与源目标列表的条件是否满足
     return !check_action_targetlist_condition(update_action_targetlist, source_targetlist, false);
 }
 
 /* report error if vars in insert_action_targetlist not found in source_targetlist */
+/*
+ * @Description: 检查插入动作的目标列表。
+ *
+ * @param merge_action_list: MERGE 语句的动作列表。
+ * @param source_targetlist: 源目标列表。
+ */
 void check_insert_action_targetlist(List* merge_action_list, List* source_targetlist)
 {
     ListCell* action_cell = NULL;
@@ -1984,6 +2229,7 @@ void check_insert_action_targetlist(List* merge_action_list, List* source_target
             break;
         }
     }
+    // 检查插入动作的目标列表是否满足条件
     if (!check_action_targetlist_condition(insert_action_targetlist, source_targetlist, true)) {
         ereport(ERROR,
             (errcode(ERRCODE_UNDEFINED_COLUMN),
@@ -1997,15 +2243,20 @@ void check_insert_action_targetlist(List* merge_action_list, List* source_target
 void fixResTargetNameWithAlias(List *clause_list, const char *aliasname)
 {
     ListCell *cell = NULL;
+    // 遍历 SET 子句列表
     foreach (cell, clause_list) {
         if (IsA(lfirst(cell), ResTarget)) {
             ResTarget *res = (ResTarget *)lfirst(cell);
+            // 判断列名是否等于表的别名，且存在间接引用
             if (!strcmp(res->name, aliasname) && res->indirection) {
 #ifndef FRONTEND_PARSER
+                // 在不是前端解析器的情况下，复制列名
                 char *resname = pstrdup((char *)(((Value *)lfirst(list_head(res->indirection)))->val.str));
 #else
+                // 在前端解析器的情况下，使用前端解析器的字符串复制函数
                 char *resname = feparser_strdup((char *)(((Value *)lfirst(list_head(res->indirection)))->val.str));
 #endif
+                // 更新 ResTarget 的列名和间接引用列表
                 ((ResTarget *)lfirst(cell))->name = resname;
                 ((ResTarget *)lfirst(cell))->indirection = RemoveListCell(res->indirection, 1);
             }

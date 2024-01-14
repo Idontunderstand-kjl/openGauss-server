@@ -44,6 +44,7 @@
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_proc.h"
+#include "catalog/gs_collation.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "parser/parse_collate.h"
@@ -326,11 +327,11 @@ Oid select_common_collation(ParseState* pstate, List* exprs, bool none_ok)
  */
 static bool assign_collations_walker(Node* node, assign_collations_context* context)
 {
-    Oid collation = InvalidOid;
-    Oid type_oid = InvalidOid;
-    CollateStrength strength = COLLATE_NONE;
-    CollateDerivation derivation = DERIVATION_IGNORABLE;
-    int location = -1;
+    Oid collation = InvalidOid;  // 当前节点的排序 OID
+    Oid type_oid = InvalidOid;   // 当前节点的数据类型 OID
+    CollateStrength strength = COLLATE_NONE;              // 当前排序选择的强度
+    CollateDerivation derivation = DERIVATION_IGNORABLE;  // 排序的派生方式
+    int location = -1;           // 表达式的位置
 
     /* Need do nothing for empty subexpressions */
     if (node == NULL) {
@@ -625,6 +626,12 @@ static bool assign_collations_walker(Node* node, assign_collations_context* cont
             }
             if (IsA(node, Const)) {
                 derivation = ((Const*)node)->constisnull ? DERIVATION_IGNORABLE : DERIVATION_COERCIBLE;
+            } else if (IsA(node, Param)) {
+                /*
+                 * We set bind param DERIVATION_COERCIBLE to make "column = $1" and  "column = 'string'"
+                 * use the same collation to compare.
+                 */
+                derivation = (((Param*)node)->is_bind_param) ? DERIVATION_COERCIBLE : DERIVATION_IMPLICIT;
             } else {
                 derivation = DERIVATION_IMPLICIT;
             }
@@ -804,7 +811,7 @@ static void merge_collation_state(Oid collation, CollateStrength strength, int l
                     return merge_diff_charset_collation(
                         collation, strength, location, derivation, charset, context_charset, context);
                 }
-                
+
                 if (collation != context->collation) {
                     /*
                      * Non-default implicit collation always beats default.
@@ -915,7 +922,7 @@ static void merge_diff_charset_collation(Oid collation, CollateStrength strength
     } else if (context->collation == BINARY_COLLATION_OID) {
         return;
     }
-    
+
     /* unicode charset has precedence */
     if (IS_UNICODE_ENCODING(charset)){
         context->collation = collation;
@@ -931,18 +938,29 @@ static void merge_diff_charset_collation(Oid collation, CollateStrength strength
     context->location2 = location;
 }
 
+/*
+ * @Description: 处理 B 兼容性模式下表达式的字符集和排序规则兼容性检查。
+ *
+ * @param node: 要处理的节点，通常是一个表达式树的节点。
+ * @param expr_type: 表达式的数据类型的对象标识符。
+ * @param context: 用于传递和维护上下文信息的结构体指针。
+ * @param location: 表达式在源代码中的位置信息。
+ */
 static void deal_expr_collation_b_compatibility(Node* node, Oid expr_type,
     assign_collations_context* context, int location)
 {
     int db_charset = GetDatabaseEncoding();
     int arg_charset = get_valid_charset_by_collation(context->collation);
+    // 检查参数字符集是否与数据库编码不同
     if (arg_charset != db_charset) {
         check_type_supports_multi_charset(expr_type, true);
     }
 
+    // 检查节点是否为函数表达式
     if (IsA(node, FuncExpr)) {
         FuncExpr* func = (FuncExpr*)node;
         if (IsSystemObjOid(func->funcid)) {
+            // 处理特定的系统函数
             if (func->funcid == VERSIONFUNCOID ||
                 func->funcid == OPENGAUSSVERSIONFUNCOID) {
                 context->derivation = DERIVATION_SYSCONST;
@@ -1036,7 +1054,7 @@ static void assign_aggregate_collations(Aggref* aggref, assign_collations_contex
  */
 static void assign_ordered_set_collations(Aggref* aggref, assign_collations_context* loccontext)
 {
-    bool merge_sort_collations;
+    bool merge_sort_collations;  // 用于标记是否合并排序规则
     ListCell* lc = NULL;
 
     /*
@@ -1068,6 +1086,7 @@ static void check_collate_expr_charset(ParseState *pstate, CollateExpr *cexpr, O
         return;
     }
 
+    // 如果参数的排序规则是二进制排序，且 COLLATE 表达式的排序规则与参数不同，抛出错误
     if (arg_collation == BINARY_COLLATION_OID) {
         const char* coll_name = get_collation_name(cexpr->collOid);
         ereport(ERROR,
@@ -1075,23 +1094,29 @@ static void check_collate_expr_charset(ParseState *pstate, CollateExpr *cexpr, O
                 parser_errposition(pstate, cexpr->location)));
     }
 
+    // 获取参数的数据类型 OID
     Oid argtype = exprType((Node*)cexpr->arg);
+    // 如果 COLLATE 表达式的排序规则是二进制排序，且参数的数据类型是二进制类型，直接返回
     if (cexpr->collOid == BINARY_COLLATION_OID &&
         (argtype == BITOID || argtype == VARBITOID || IsBinaryType(argtype))) {
         return;
     }
 
+    // 如果参数的数据类型不可排序，且不是 UNKNOWNOID，直接返回
     if (!type_is_collatable(argtype) && argtype != UNKNOWNOID) {
         return;
     }
 
+    // 获取参数和 COLLATE 表达式排序规则对应的字符集编码
     int argcharset = get_charset_by_collation(arg_collation);
     int newcharset = get_charset_by_collation(cexpr->collOid);
+    // 如果字符集编码相同，直接返回
     if (newcharset == argcharset) {
         return;
     }
+    // 如果 COLLATE 表达式的字符集编码为 PG_INVALID_ENCODING，保持与之前版本的语法兼容
     if (newcharset == PG_INVALID_ENCODING) {
-        /* 
+        /*
          * eg: _utf8mb4 'string' COLLATE "C" or
          *     'string' COLLATE 'utf8mb4_unicode_ci' COLLATE "C" or
          *     'string' COLLATE "zh_CN.utf8" COLLATE "C"
@@ -1109,7 +1134,9 @@ static void check_collate_expr_charset(ParseState *pstate, CollateExpr *cexpr, O
                 parser_errposition(pstate, cexpr->location)));
     }
 
+    // 如果参数的字符集编码为 PG_INVALID_ENCODING，设置为当前数据库编码
     argcharset = (argcharset == PG_INVALID_ENCODING) ? GetDatabaseEncoding() : argcharset;
+    // 如果 COLLATE 表达式的字符集编码不同于参数，抛出错误
     if (newcharset != argcharset) {
         const char* coll_name = get_collation_name(cexpr->collOid);
         const char* encoding_name = pg_encoding_to_char(argcharset);
@@ -1121,34 +1148,48 @@ static void check_collate_expr_charset(ParseState *pstate, CollateExpr *cexpr, O
     }
 }
 
+/*
+ * @Description: 更新上下文中的字符集状态，用于处理字符集兼容性。
+ *
+ * @param context: 上下文信息，包含字符集状态等。
+ * @param collation: 待处理的排序规则 OID。
+ */
 static void update_charset_status(assign_collations_context* context, Oid collation)
 {
+    // 如果排序规则无效，直接返回
     if (!OidIsValid(collation)) {
         return;
     }
 
+    // 如果字符集状态已经是 MULTI_CHARSET，则无需更新
     if (context->charset_status == MULTI_CHARSET) {
         return;
     }
 
+    // 如果字符集状态是 UNKNOWN_CHARSET，更新为 SINGLE_CHARSET
     if (context->charset_status == UNKNONWN_CHARSET) {
         context->charset_status = SINGLE_CHARSET;
         return;
     }
 
+    // 如果排序规则是二进制排序，或者上下文中的排序规则为二进制，直接返回
     if (collation == BINARY_COLLATION_OID || context->collation == BINARY_COLLATION_OID) {
         return;
     }
 
+    // 如果排序强度为 COLLATE_NONE 且上下文中的排序规则无效，直接返回
     if (context->strength == COLLATE_NONE && !OidIsValid(context->collation)) {
         return;
     }
 
+    // 获取待处理排序规则和上下文排序规则对应的字符集编码
     int charset = get_valid_charset_by_collation(collation);
     int context_charset = get_valid_charset_by_collation(context->collation);
 
+    // 如果字符集编码不一致，将字符集状态更新为 MULTI_CHARSET
     if (charset != context_charset) {
         context->charset_status = MULTI_CHARSET;
+        // 如果不允许多字符集，抛出错误
         if (!ENABLE_MULTI_CHARSET) {
             ereport(ERROR, (errcode(ERRCODE_COLLATION_MISMATCH),
                 errmsg("different character set data is not allowed when parameter "
@@ -1157,16 +1198,34 @@ static void update_charset_status(assign_collations_context* context, Oid collat
     }
 }
 
+/*
+ * @Description: 将表达式节点的字符集转换为目标字符集。
+ *
+ * @param arg_expr: 待转换的表达式节点。
+ * @param target_charset: 目标字符集对应的编码。
+ * @param target_collation: 目标字符集的排序规则 OID。
+ *
+ * @return: 转换后的表达式节点。
+ */
 Node *convert_arg_charset(Node *arg_expr, int target_charset, Oid target_collation)
 {
+    // 获取表达式节点的数据类型 OID
     Oid type_oid = exprType(arg_expr);
+    // 如果表达式节点的排序规则为二进制，直接返回原节点
     if (exprCollation(arg_expr) == BINARY_COLLATION_OID) {
         return arg_expr;
     }
 
+    // 调用函数将表达式节点转换为目标字符集
     return coerce_to_target_charset(arg_expr, target_charset, type_oid, exprTypmod(arg_expr), target_collation);
 }
 
+/*
+ * @Description: 合并参数列表中每个表达式节点的字符集信息。
+ *
+ * @param target_collation: 目标字符集。
+ * @param args: 表达式节点列表。
+ */
 void merge_arg_charsets(Oid target_collation, List *args)
 {
     if (target_collation == BINARY_COLLATION_OID) {
@@ -1180,44 +1239,70 @@ void merge_arg_charsets(Oid target_collation, List *args)
     }
 }
 
+/*
+ * @Description: 合并普通聚合 Aggref 表达式节点的字符集信息。
+ *
+ * @param aggref: 普通聚合 Aggref 表达式节点。
+ * @param target_collation: 目标字符集。
+ */
 static void merge_aggregate_charsets(Aggref* aggref, Oid target_collation)
 {
     if (target_collation == BINARY_COLLATION_OID) {
         return;
     }
 
+    // 获取目标字符集对应的编码
     int target_charset = get_valid_charset_by_collation(target_collation);
+    // 遍历每个参数，对非冗余参数进行字符集转换
     foreach_cell (lc, aggref->args) {
         TargetEntry* tle = (TargetEntry*)lfirst(lc);
         Assert(IsA(tle, TargetEntry));
+        // 如果不是冗余参数，将参数表达式转换为目标字符集
         if (!tle->resjunk) {
             tle->expr = (Expr*)convert_arg_charset((Node*)tle->expr, target_charset, target_collation);
         }
     }
 }
 
+/*
+ * @Description: 合并有序集合 Aggref 表达式节点的字符集信息。
+ *
+ * @param aggref: 有序集合 Aggref 表达式节点。
+ * @param target_collation: 目标字符集。
+ */
 static void merge_ordered_set_charsets(Aggref* aggref, Oid target_collation)
 {
     if (target_collation == BINARY_COLLATION_OID) {
         return;
     }
 
+    // 合并直接参数的字符集信息
     merge_arg_charsets(target_collation, aggref->aggdirectargs);
 
+    // 判断是否为合并排序的字符集
     bool merge_sort_collations = (list_length(aggref->args) == 1 &&
         get_func_variadictype(aggref->aggfnoid) == InvalidOid);
     int target_charset = get_valid_charset_by_collation(target_collation);
+    // 遍历每个参数，根据是否为合并排序的字符集进行相应处理
     foreach_cell (lc, aggref->args) {
         TargetEntry* tle = (TargetEntry*)lfirst(lc);
         Assert(IsA(tle, TargetEntry));
+        // 如果是合并排序的字符集，将参数表达式转换为目标字符集
         if (merge_sort_collations) {
             tle->expr = (Expr*)convert_arg_charset((Node*)tle->expr, target_charset, target_collation);
         }
     }
 }
 
+/*
+ * @Description: 合并 Aggref 表达式节点的字符集信息。
+ *
+ * @param aggref: Aggref 表达式节点。
+ * @param target_collation: 目标字符集。
+ */
 static void merge_aggref_charsets(Aggref* aggref, Oid target_collation)
 {
+    // 根据聚合类型调用不同的合并字符集的函数
     switch (aggref->aggkind) {
         case AGGKIND_NORMAL:
             merge_aggregate_charsets(aggref, target_collation);
@@ -1231,60 +1316,98 @@ static void merge_aggref_charsets(Aggref* aggref, Oid target_collation)
     }
 }
 
+/*
+ * @Description: 合并 RowCompareExpr 表达式的字符集信息。
+ *
+ * @param rcexpr: RowCompareExpr 表达式节点。
+ */
 void merge_rowcompareexpr_arg_charsets(RowCompareExpr *rcexpr)
 {
     ListCell *left_item = NULL;
     ListCell *right_item = NULL;
     ListCell *coll_item = NULL;
+    // 遍历 RowCompareExpr 表达式的左表达式列表、右表达式列表、以及输入字符集列表
     forthree(left_item, rcexpr->largs, right_item, rcexpr->rargs, coll_item, rcexpr->inputcollids) {
         Node *left_expr = (Node*)lfirst(left_item);
         Node *right_expr = (Node*)lfirst(right_item);
         Oid collation = lfirst_oid(coll_item);
+        // 如果字符集是二进制字符集，直接跳过
         if (collation == BINARY_COLLATION_OID) {
             continue;
         }
 
+        // 获取字符集对应的有效字符集
         int charset = get_valid_charset_by_collation(collation);
+        // 转换左表达式和右表达式的字符集
         lfirst(left_item) = (void*)convert_arg_charset(left_expr, charset, collation);
         lfirst(right_item) = (void*)convert_arg_charset(right_expr, charset, collation);
     }
 }
 
+/*
+ * @Description: 合并 CaseExpr 表达式的字符集信息。
+ *
+ * @param target_collation: 目标字符集的 OID。
+ * @param caseexpr: CaseExpr 表达式节点。
+ */
 void merge_caseexpr_arg_charsets(Oid target_collation, CaseExpr *caseexpr)
 {
+    // 如果目标字符集是二进制字符集，直接返回
     if (target_collation == BINARY_COLLATION_OID) {
         return;
     }
 
+    // 获取目标字符集对应的有效字符集
     int target_charset = get_valid_charset_by_collation(target_collation);
     foreach_cell(item, caseexpr->args) {
         CaseWhen* when = (CaseWhen*)lfirst(item);
         Assert(IsA(when, CaseWhen));
+        // 转换分支结果表达式的字符集
         when->result = (Expr*)convert_arg_charset((Node*)when->result, target_charset, target_collation);
     }
+    // 转换默认结果表达式的字符集
     caseexpr->defresult = (Expr*)convert_arg_charset((Node*)caseexpr->defresult, target_charset, target_collation);
 }
 
+/*
+ * @Description: 合并 ScalarArrayOpExpr 表达式的字符集信息。
+ *
+ * @param target_collation: 目标字符集的 OID。
+ * @param sexpr: ScalarArrayOpExpr 表达式节点。
+ */
 void merge_scalararrayopexpr_arg_charsets(Oid target_collation, ScalarArrayOpExpr *sexpr)
 {
+    // 如果目标字符集是二进制字符集，直接返回
     if (target_collation == BINARY_COLLATION_OID) {
         return;
     }
     Assert(list_length(sexpr->args) == 2);
 
+    // 获取列表达式和数组表达式
     Node *col_expr = (Node*)linitial(sexpr->args);
     Node *array_expr = (Node*)lsecond(sexpr->args);
+    // 获取目标字符集对应的有效字符集
     int target_charset = get_valid_charset_by_collation(target_collation);
+    // 转换列表达式的字符集
     linitial(sexpr->args) = (void*)convert_arg_charset(col_expr, target_charset, target_collation);
+    // 递归处理数组表达式的字符集
     assign_expression_charset(array_expr, target_collation);
 }
 
+/*
+ * @Description: 将表达式的字符集信息合并为目标字符集。
+ *
+ * @param node: 待处理的表达式节点。
+ * @param target_collation: 目标字符集的 OID。
+ */
 static void assign_expression_charset(Node* node, Oid target_collation)
 {
+    // 如果不是 B 格式兼容，或者节点为空，或者目标字符集是二进制字符集，直接返回
     if (!DB_IS_CMPT(B_FORMAT) || node == NULL || target_collation == BINARY_COLLATION_OID) {
         return;
     }
 
+    // 检查递归深度
     check_stack_depth();
     switch (nodeTag(node)) {
         case T_Aggref: {
@@ -1322,6 +1445,7 @@ static void assign_expression_charset(Node* node, Oid target_collation)
             merge_arg_charsets(target_collation, ((XmlExpr*)node)->args);
         } break;
         case T_ArrayCoerceExpr: {
+            // 递归处理 ArrayCoerceExpr 表达式
             assign_expression_charset((Node*)((ArrayCoerceExpr*)node)->arg, target_collation);
             exprSetCollation(node, target_collation);
         } break;
@@ -1334,6 +1458,7 @@ static void assign_expression_charset(Node* node, Oid target_collation)
             // have been merged in assign_collations_walker
         } break;
         default:
+            // 报告错误，未识别的节点类型
             ereport(ERROR,
                 (errcode(ERRCODE_UNRECOGNIZED_NODE_TYPE),
                     errmsg("unrecognized node type: %d during merge expression charsets", (int)nodeTag(node))));
@@ -1341,4 +1466,38 @@ static void assign_expression_charset(Node* node, Oid target_collation)
     }
 
     return;
+}
+
+/*
+ * @Description: 检查具有相同排序规则的值列表中是否存在重复值。
+ *
+ * @param vals: 待检查的值列表。
+ * @param collation: 排序规则的 OID。
+ * @param type: 值列表的类型，可能是 'S'（集合）或 'E'（枚举）。
+ */
+void check_duplicate_value_by_collation(List* vals, Oid collation, char type)
+{
+    // 如果不是 B 格式排序规则，直接返回
+    if (!is_b_format_collation(collation)) {
+        return ;
+    }
+
+    ListCell* lc = NULL;
+    // 遍历值列表
+    foreach (lc, vals) {
+        ListCell* next_cell = lc->next;
+        char* lab = strVal(lfirst(lc));
+        // 检查当前值与后续值是否有相同排序规则的重复
+        while(next_cell != NULL) {
+            char* next_lab = strVal(lfirst(next_cell));
+            if (varstr_cmp_by_builtin_collations(lab, strlen(lab), next_lab, strlen(next_lab), collation) == 0) {
+                const char* type_name = NULL;
+                type_name = (type == TYPTYPE_SET) ? "set" : "enum";
+                // 报告错误，指出存在重复的键值
+                ereport(ERROR, (errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+                    errmsg("%s has duplicate key value \"%s\" = \"%s\"", type_name, lab, next_lab)));
+            }
+            next_cell = lnext(next_cell);
+        }
+    }
 }
